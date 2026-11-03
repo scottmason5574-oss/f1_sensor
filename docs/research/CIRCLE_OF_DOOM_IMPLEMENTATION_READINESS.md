@@ -6,7 +6,7 @@ description: Circle of Doom implementation readiness for F1 Sensor.
 
 # Circle of Doom implementation readiness
 
-M1C contracts and synthetic regression coverage are implemented. Standalone runtime validation is blocked by WSL access, and production reference-lap eligibility remains unavailable without whole-lap evidence.
+M1C contracts and synthetic regression coverage are implemented. Standalone synthetic runtime checks passed on Home Assistant 2026.9.0, and production reference-lap eligibility remains unavailable without whole-lap evidence.
 
 | Feature | Existing support | Backend need | Frontend and calculation | Tests and dependencies | Readiness and unknowns |
 | --- | --- | --- | --- | --- | --- |
@@ -23,4 +23,4 @@ M1C contracts and synthetic regression coverage are implemented. Standalone runt
 
 ## Phase 1 validation evidence
 
-The [M1C validation report](./CIRCLE_OF_DOOM_M1C_VALIDATION_REPORT.md) records Task 4A test evidence and the blocked Task 4B standalone runtime gate. Phase 2 readiness remains conditional.
+The [M1C validation report](./CIRCLE_OF_DOOM_M1C_VALIDATION_REPORT.md) records Task 4A test evidence and the completed Task 4B standalone runtime checks. Phase 2 readiness remains conditional.
