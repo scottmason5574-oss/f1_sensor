@@ -5,75 +5,59 @@ title: Circle of Doom Phase 1 validation report
 
 # Circle of Doom Phase 1 validation report
 
-## A. Executive summary
+**PARTIAL.** The analysis websocket contract supports classification and completed lap counts. The Phase 1 adapter exposes those inputs and a unique classified leader's relative zero. A usable production follower gap still requires source-aligned provenance. Replay and delay parity remain open.
 
-**PARTIAL.** A deterministic gap projection is covered by synthetic tests. Production timing transport does not yet supply its required provenance. Live Delay and replay equivalence remain unverified.
+## Fields and clocks
 
-## B. Repository evidence
+[Phase4AnalysisStore](../../custom_components/f1_sensor/analysis.py) deep-merges sparse TimingData Lines by racing number. Position supplies race order. NumberOfLaps counts completions. GapToLeader and IntervalToPositionAhead are separate display values. The store unwraps Value where supplied. Existing synthetic tests use positive gap strings and the projection interprets positive seconds as behind the leader. Recorded source sign and lap token coverage were unavailable in the checked fixtures. Numeric gaps, explicit counted lap tokens and missing values remain separate. A bare LAP supplies no count. The difference between completion counts can change at the finish line without a change in whole-lap deficit. No integer deficit supplies residual phase or physical XY.
 
-Fork is scottmason5574-oss/f1_sensor. Branch is feature/circle-of-doom-phase1-timing-contract, based on ee2f621ff3cd5a5937ea59df9991c07746d2edd7. The commit containing this report is the reviewed snapshot. See the branch history for its SHA and the fork for publication status.
+[Analysis websocket](../../custom_components/f1_sensor/analysis_websocket.py) sends store snapshots. Snapshot timestamps do not establish individual field times. The live bus drops source envelope timing at this subscription boundary. A later sparse merge can keep an old gap while position changes. Correction identity and independent availability times are absent from the resulting rows.
 
-## C. Timing contract
+## Adapter and leader epochs
 
-| Field | Source and type | Timing and validity |
-| --- | --- | --- |
-| context | Caller-supplied session/source/generation key | Exact match required. Change on reset or incompatible seek. |
-| driver / anchor | Stable racing-number keys | Anchor is the verified current leader. Supply observations only from the current leader epoch, including when the same driver regains the lead. |
-| eventTime / availableAt / asOf | Finite seconds on the same source-relative clock | Event time records the observation. Availability records when the observation can first be used. Future or incompatible observations are excluded. |
-| rawGap | TimingData GapToLeader scalar or Value wrapper | Latest eligible event wins. Later availability replaces an equal-time event. On an exact tie the last supplied observation wins, so retain stable input order. |
-| gapSeconds | Nullable number | Positive is behind the confirmed leader under the race-gap convention. Fresh observations for the leader produce zero. Negative, missing, nonnumeric and stale follower gaps are unavailable. |
-| lapDeficit | Nullable positive integer | Explicit signed-plus or unsigned lap-count token only. Bare LAP lacks a count. A lap deficit supplies no residual phase. |
-| stale | Boolean | Compare asOf minus eventTime with caller-supplied maxAge. Stale values preserve provenance while withholding derived fields. |
+[Race gap contract](../../custom_components/f1_sensor/www/f1-sensor-live-data-card/modular/race-gap.js) can consume the existing protocol v1 timing array directly. This interface is available to a future caller. The current card has no consumer. The adapter withholds all follower gap and deficit outputs because snapshot provenance is insufficient. Its leader is unique Position 1, with implicit relative zero. Duplicate Position 1 leaves the leader unknown. This zero carries no crossing clock or phase.
 
-The race-gap sign and token examples are contract assumptions exercised on synthetic input. The code trace establishes field separation, while production feed semantics still need representative source captures. analysis.py deep-merges sparse TimingData lines and exposes position, NumberOfLaps, gap, interval and last lap separately via analysis_websocket.py. The analysis-data.js module consumes analysis snapshots. The driver_positions path in __init__.py and the card timing fields serve display. Snapshot or entity update timestamps cannot establish when an individual retained gap changed. Position is classification and IntervalToPositionAhead uses a different reference. A difference in completed lap counters near the finish line is insufficient to prove a whole-lap deficit. The relative formula maps 9 seconds against 90 seconds to 36 degrees. Absolute phase needs a leader crossing anchor, a compatible source clock and a progress model. Lapped-car phase needs an independently observed residual. Pit and neutralization effects on reported gaps remain unverified.
+The timestamped projection requires matching session/source/generation and leader epoch. A caller must issue a new epoch for every leadership discontinuity, including A to B to A, and supply compatible observations. The projection accepts observations at or before as-of, prefers the latest event and then latest availability, and resolves exact ties in input order. It withholds stale outputs by source age. The snapshot adapter cannot mint epoch or event metadata. No additional history is retained.
 
-## D. Reference-lap readiness
+## Replay and Live Delay
 
-Phase4AnalysisStore captures bounded strategy lap records keyed by driver and lap and replaces their lap details on subsequent observations. The first associated position and stint context are retained. TrackStatus updates record status changes, but their presence does not prove uninterrupted coverage over a lap. TimingAppData merges stints and supports tyre context. Pit and tyre observations need same-session joins to both lap boundaries to establish in/out lap exclusion. Minisector status frames provide segment status, with crossing timestamps unverified.
+[Replay mode](../../custom_components/f1_sensor/replay_mode.py) retains timestamped archive frames and schedules playback on its media timeline. Checkpoint construction merges timing fields. A cold seek resets analysis, injects checkpoint state and then applies the relevant frame range. Archived frame timestamps are not carried to the analysis callback, and checkpoint gap values can outlive their leadership epoch. Thus both paths can expose merged display data, while exact usable follower parity is unverified. Speed changes affect scheduling. The existing frontend replay tests verify control behavior and seek offsets. Synthetic projection tests verify availability, stale values and reset isolation, without exercising replay transport.
 
-Before selecting recent green leader laps, expose or verify same-clock lap start and completion times, first availability, correction identity, track status coverage, pit association and validity. Then evaluate the median of up to five eligible samples at the target instant. Represent missing coverage explicitly.
+The delayed analysis bus in [integration setup](../../custom_components/f1_sensor/__init__.py) uses the shared delayed callback queue, which schedules release from monotonic receipt plus configured delay, cancels prior generations and bypasses delay for replay. This defines exposure order but supplies no source field time. The backend delay and replay integration suites were blocked at import. Actual live-session validation was not run.
 
-## E. Replay and Live Delay evidence
+## Reference lap
 
-Live Delay queues delayed ingest callbacks in __init__.py. Releasing a callback and observing its payload are separate events. ReplayFrame and replay routing provide a playback timeline, while UI replay tests cover control state and seek offsets. The projection tests compare a synthetic observation sequence against a reduced checkpoint and gate a correction on availability. This validates the projection only. Runtime linear replay, cold seek, speed changes and delayed release parity were not exercised. The transport adapter must preserve ordered corrections and supply compatible source timestamps before the projection can be wired in.
+[History](../../custom_components/f1_sensor/history.py) retains completed lap durations and accepts revisions. Strategy rows retain initial position and stint associations. TimingAppData stints, pit context and TrackStatus transitions are available as separate inputs. A small adapter could expose candidate durations and observed context. A deterministic eligible green leader median still needs coherent start and finish boundaries, correction availability, coverage of TrackStatus throughout the lap, pit association and validity, with equivalent seek reconstruction. Absolute leader phase and continuous progress require verified crossings and a compatible clock. No fallback duration is asserted.
 
-## F. Implementation summary
+## Verification
 
-The modular race-gap.js helper projects a caller-supplied observation window without retaining history or altering existing integration behavior. modular-race-gap.test.mjs checks the documented synthetic cases. Readiness and next steps link to this report. No renderer or prediction engine is included.
-
-## G. Test results
-
-| Command | Result |
+| Command | Outcome |
 | --- | --- |
-| node --test frontend-tests/unit/modular-race-gap.test.mjs frontend-tests/unit/modular-replay.test.mjs | PASS, 8 tests |
-| npm run setup:ci | FAILED, python3 launcher could not execute |
-| python scripts/setup_ci_environment.py | FAILED, installed Python 3.11.9 and profile requires 3.14 |
-| npm run verify:changed | FAILED, python3 launcher could not execute |
-| python scripts/verify_dev.py changed | FAILED, Git comparison could not establish a revision |
-| python -m pytest -q custom_components/f1_sensor/tests/test_phase_4_analysis.py custom_components/f1_sensor/tests/test_live_delay_queue.py custom_components/f1_sensor/tests/test_replay_seek.py | FAILED during conftest import, pycares missing, zero tests |
-| HAdev parity and live validation | NOT RUN |
+| node --test frontend-tests/unit/modular-race-gap.test.mjs frontend-tests/unit/modular-replay.test.mjs | PASS, 10 tests. Five contract tests use synthetic observations or producer-shaped snapshots. |
+| git diff --check | PASS |
+| npm run setup:ci / npm run verify:changed | BLOCKED, Windows python3 alias cannot execute |
+| python scripts/setup_ci_environment.py | BLOCKED, installed Python 3.11.9, required Python 3.14 |
+| python scripts/verify_dev.py changed --target main --base origin/main | Comparison resolved. Isolated setup blocked on Python 3.14. The default origin/dev ref is absent and checkout is not shallow. |
+| python -m pytest -q custom_components/f1_sensor/tests/test_phase_4_analysis.py custom_components/f1_sensor/tests/test_live_delay_queue.py custom_components/f1_sensor/tests/test_replay_seek.py | BLOCKED, pycares import failure, zero tests collected |
+| HAdev parity and live-session validation | NOT RUN, HAdev access unavailable |
+| GitHub CI | Remote results are tracked on PR #2. Local evidence establishes no remote result. |
 
-## H. Review
+## Independent review and remaining gates
 
-The author checked the projection for future observations, stale fields, anchor changes, session isolation and correction ordering. A production caller needs an epoch boundary when a former leader regains the lead. Independent review and runtime integration evidence remain outstanding.
+A separate reviewer examined the source and tests against fork main. It found that a leader observation with a lap token could emit both zero and a deficit. The projection now suppresses leader deficits and the test exercises the contradictory input. The reviewer also identified missing production caller and runtime parity evidence, both explicitly open. The reviewer rechecked the repaired combined diff and found no additional blocking code issue.
 
-## I. Risks
-
-- P0 — Local preflight and HAdev parity are outstanding.
-- P1 — Current analysis transport lacks demonstrated per-field provenance and leader epochs. Replay and Live Delay parity remain open.
-- P1 — Reference lap validity and complete flag/pit coverage remain unverified.
-- P2 — Exact minisector crossings may improve precision in a later phase.
-
-## J. Phase 2 dependency assessment
-
-| Dependency | Readiness |
+| Gate | Status |
 | --- | --- |
-| Driver labels | READY WITH CONDITIONS, join existing metadata by racing number within session |
-| Relative circular positioning and timing-only fallback | READY WITH CONDITIONS, require verified fresh gap and reference duration |
-| Lap offsets | READY WITH CONDITIONS, display explicit deficits when supported and keep residual phase unknown |
-| Reference lap, absolute leader phase and smooth movement | BLOCKED, require crossing and lap interval provenance |
-| Live and replay support | BLOCKED, require production adapter and parity evidence |
+| Production contract | PASS for the documented safe unavailable path |
+| Leader and lap correctness | PASS at projection and snapshot interface scope |
+| Replay determinism | PARTIAL, checkpoint limitation identified, runtime parity unverified |
+| Live Delay | NOT RUN, queue implementation traced |
+| Regression safety | PARTIAL, supported backend and HAdev verification outstanding |
+| Independent review | PASS, independent diff review and repair |
+| Phase 2 decision | PASS, dependencies classified below |
 
-## K. Merge recommendation
+## Phase 2 and merge recommendation
 
-**NOT READY — BLOCKERS REMAIN**
+Driver labels, race order and unavailable-state presentation have inputs. Relative circular positioning needs fresh epoch-compatible gaps and an eligible reference duration. Display of explicit lap counts needs verified source semantics and provenance. Lapped-driver phase, absolute leader anchoring and continuous animation require additional verified inputs. Keep Phase 2 gated.
+
+**NOT READY — BLOCKERS REMAIN.** Keep PR #2 draft. The next work is a source-faithful gap capture and a minimal clock and epoch contract that survives checkpoint reconstruction, then queue and seek tests on supported CI and HAdev parity.

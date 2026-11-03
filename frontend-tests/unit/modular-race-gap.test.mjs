@@ -1,19 +1,20 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { raceGapFrame } from '../../custom_components/f1_sensor/www/f1-sensor-live-data-card/modular/race-gap.js';
+import { analysisRaceGapFrame, raceGapFrame } from '../../custom_components/f1_sensor/www/f1-sensor-live-data-card/modular/race-gap.js';
 
-const context = { context: 'synthetic-live-1', leader: '1', asOf: 20, maxAge: 10 };
+const context = { context: 'synthetic-live-1', leader: '1', leaderEpoch: 1, asOf: 20, maxAge: 10 };
 const gap = (driver, value, overrides = {}) => ({
-  context: context.context, anchor: '1', driver, gap: value,
+  context: context.context, anchor: '1', leaderEpoch: 1, driver, gap: value,
   eventTime: 12, availableAt: 14, ...overrides,
 });
 
 test('preserves race gap, lap deficit, invalid and missing observations separately', () => {
   const frame = raceGapFrame([
-    gap('1', 'LEADER'), gap('2', { Value: '+1.2' }), gap('3', '+1 LAP'),
+    gap('1', '+1 LAP'), gap('2', { Value: '+1.2' }), gap('3', '+1 LAP'),
     gap('4', '-1.0'), gap('5', 'LAP'), gap('6', null),
   ], context);
   assert.equal(frame.get('1').gapSeconds, 0);
+  assert.equal(frame.get('1').lapDeficit, null);
   assert.equal(frame.get('2').gapSeconds, 1.2);
   assert.equal(frame.get('3').lapDeficit, 1);
   for (const driver of ['3', '4', '5', '6']) assert.equal(frame.get(driver).gapSeconds, null);
@@ -39,4 +40,30 @@ test('rejects stale values, incompatible clocks, sessions and leader anchors', (
   assert.equal(raceGapFrame(history, context).has('3'), false);
   assert.equal(raceGapFrame(history, { ...context, context: 'synthetic-replay-2' }).size, 0);
   assert.equal(raceGapFrame(history, { ...context, leader: '2' }).size, 0);
+});
+
+test('A to B to A cannot revive a gap from the first leadership epoch', () => {
+  const first = gap('3', '+4');
+  const second = gap('3', '+5', { anchor: '2', leaderEpoch: 2 });
+  assert.equal(raceGapFrame([first, second], { ...context, leader: '2', leaderEpoch: 2 }).get('3').gapSeconds, 5);
+  const returned = { ...context, leaderEpoch: 3 };
+  assert.equal(raceGapFrame([first, second], returned).size, 0);
+  assert.equal(raceGapFrame([first, second, gap('3', '+6', { leaderEpoch: 3 })], returned).get('3').gapSeconds, 6);
+});
+
+// Synthetic snapshot using the Phase4AnalysisStore websocket field names.
+test('merged analysis rows expose order and laps but withhold unclocked gaps across lead changes', () => {
+  const snapshot = { protocol_version: 1, timing: [
+    { driver_number: 1, position: 1, laps_completed: 14 },
+    { driver_number: 2, position: 2, laps_completed: 13, gap_to_leader: '+1 LAP' },
+  ] };
+  for (const positions of [[1, 2], [2, 1], [1, 2], [1, 1]]) {
+    snapshot.timing.forEach((row, index) => { row.position = positions[index]; });
+    const { leader, drivers } = analysisRaceGapFrame(snapshot);
+    assert.equal(leader, positions[0] === positions[1] ? null : positions.indexOf(1) + 1);
+    assert.equal(drivers.get(2).lapsCompleted, 13);
+    assert.equal(drivers.get(2).gapSeconds, leader === 2 ? 0 : null);
+    assert.equal(drivers.get(2).lapDeficit, null);
+    assert.equal(drivers.get(2).eventTime, null);
+  }
 });

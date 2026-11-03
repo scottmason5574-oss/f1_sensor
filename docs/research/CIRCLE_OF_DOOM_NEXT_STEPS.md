@@ -14,4 +14,4 @@ description: Circle of Doom next steps for F1 Sensor.
 
 See the [implementation plan](./CIRCLE_OF_DOOM_IMPLEMENTATION_PLAN.md) for exit criteria. Later investigations should prioritize stop-to-lap alignment and held-out rejoin validation. MultiViewer overlay parity can proceed separately if runtime evidence becomes available.
 
-The [Phase 1 validation report](./CIRCLE_OF_DOOM_PHASE1_VALIDATION_REPORT.md) identifies per-field event and availability times, leader anchor epochs, and lap interval coverage as outstanding inputs.
+The [Phase 1 validation report](./CIRCLE_OF_DOOM_PHASE1_VALIDATION_REPORT.md) documents the safe snapshot fallback. Validate source clocks, leader epochs across checkpoints, and lap interval coverage before starting Phase 2.

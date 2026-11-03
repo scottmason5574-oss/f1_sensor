@@ -6,7 +6,7 @@ description: Circle of Doom implementation readiness for F1 Sensor.
 
 # Circle of Doom implementation readiness
 
-Phase 1 is ready for approval. Later phases depend on the evidence and tests below.
+Phase 1 validation is partial. Later phases depend on the evidence and tests below.
 
 | Feature | Existing support | Backend need | Frontend and calculation | Tests and dependencies | Readiness and unknowns |
 | --- | --- | --- | --- | --- | --- |
@@ -23,4 +23,4 @@ Phase 1 is ready for approval. Later phases depend on the evidence and tests bel
 
 ## Phase 1 validation evidence
 
-The [Phase 1 validation report](./CIRCLE_OF_DOOM_PHASE1_VALIDATION_REPORT.md) records a tested gap projection and the source metadata still needed to apply it to live and replay observations. Phase 2 readiness remains conditional.
+The [Phase 1 validation report](./CIRCLE_OF_DOOM_PHASE1_VALIDATION_REPORT.md) records the snapshot adapter, the tested epoch guard, and the remaining provenance and playback gates. Phase 2 readiness remains conditional.
