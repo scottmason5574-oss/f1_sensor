@@ -589,6 +589,14 @@ class SignalRCoreClient:
         return value
 
 
+class LiveTimingDelta(dict[str, Any]):
+    """TimingData delta with the UTC stamp from its live feed envelope."""
+
+    def __init__(self, payload: dict[str, Any], source_time: float) -> None:
+        super().__init__(payload)
+        self.source_time = source_time
+
+
 class LiveBus:
     """Single shared SignalR connection with per-stream subscribers.
 
@@ -782,7 +790,17 @@ class LiveBus:
                 stream, data = args[0], args[1]
                 if not isinstance(stream, str) or data is None:
                     continue
-                self._dispatch(stream, data)
+                source_time = None
+                if (
+                    stream == "TimingData"
+                    and len(args) >= 3
+                    and isinstance(args[2], str)
+                ):
+                    with suppress(ValueError, OverflowError, OSError):
+                        stamp = dt.datetime.fromisoformat(args[2])
+                        if stamp.utcoffset() is not None:
+                            source_time = stamp.timestamp()
+                self._dispatch(stream, data, source_time=source_time)
                 meaningful = True
         result = payload.get("R")
         if isinstance(result, dict):
@@ -851,10 +869,18 @@ class LiveBus:
             return "replay transport closed"
         return type(err).__name__
 
-    def _dispatch(self, stream: str, data: StreamPayload) -> None:
+    def _dispatch(
+        self, stream: str, data: StreamPayload, *, source_time: float | None = None
+    ) -> None:
         with suppress(Exception):
             provider = "replay" if self._transport_factory is not None else "f1_live"
             data = self._provider_registry.normalize(provider, stream, data).payload
+            if (
+                provider == "f1_live"
+                and source_time is not None
+                and isinstance(data, dict)
+            ):
+                data = LiveTimingDelta(data, source_time)
             # Update counters
             self._cnt[stream] = self._cnt.get(stream, 0) + 1
             self._stream_frames[stream] = self._stream_frames.get(stream, 0) + 1

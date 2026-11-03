@@ -67,3 +67,25 @@ test('merged analysis rows expose order and laps but withhold unclocked gaps acr
     assert.equal(drivers.get(2).eventTime, null);
   }
 });
+
+test('analysis projection uses only fresh compatible provenance in a released snapshot', () => {
+  const snapshot = {
+    protocol_version: 1, provider: 'f1_live', session_id: 'race', race_gap_epoch: 3,
+    race_gap_source_time: 18, timing: [
+      { driver_number: 1, position: 1 },
+      { driver_number: 2, position: 2, gap_to_leader: '+999', gap_observation: {
+        leader: 1, epoch: 3, event_time: 16, released_at: 46, gap: '+2.5',
+      } },
+    ],
+  };
+  const read = (asOf, maxAge = 5) => analysisRaceGapFrame(snapshot, { asOf, maxAge }).drivers.get(2);
+  assert.equal(read(20).gapSeconds, 2.5);
+  assert.equal(read(20).releasedAt, 46);
+  assert.equal(read(22).gapSeconds, null);
+  assert.equal(read(17).gapSeconds, null);
+  snapshot.timing[1].gap_observation.gap = '+1 LAP';
+  assert.equal(read(20).lapDeficit, 1);
+  assert.equal(read(20).gapSeconds, null);
+  snapshot.race_gap_epoch += 1;
+  assert.equal(read(20).lapDeficit, null);
+});

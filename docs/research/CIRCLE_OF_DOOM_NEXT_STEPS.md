@@ -6,7 +6,7 @@ description: Circle of Doom next steps for F1 Sensor.
 
 # Circle of Doom next steps
 
-1. Obtain approval for Phase 1. Check the fork revision, repository guidance and working tree.
+1. Continue the authorized Phase 1 work on the fork PR. Verify the revision and repository guidance.
 2. Trace representative replay fixtures and source timestamps for gaps, lap completion, lapped transitions, timing resets and TrackStatus. Document which cases require live confirmation.
 3. Compare straight playback with cold seek and Live Delay release for the same race instant. Identify gaps in replay coverage, reconnect warm-up and freshness metadata.
 4. Decide whether a green-lap reference can use current observations. Propose the smallest bounded extension only for proven gaps. Defer precise crossings until their evidence improves.
@@ -14,4 +14,4 @@ description: Circle of Doom next steps for F1 Sensor.
 
 See the [implementation plan](./CIRCLE_OF_DOOM_IMPLEMENTATION_PLAN.md) for exit criteria. Later investigations should prioritize stop-to-lap alignment and held-out rejoin validation. MultiViewer overlay parity can proceed separately if runtime evidence becomes available.
 
-The [Phase 1 validation report](./CIRCLE_OF_DOOM_PHASE1_VALIDATION_REPORT.md) documents the safe snapshot fallback. Validate source clocks, leader epochs across checkpoints, and lap interval coverage before starting Phase 2.
+The [Phase 1 validation report](./CIRCLE_OF_DOOM_PHASE1_VALIDATION_REPORT.md) documents live gap provenance and the conservative replay fallback. Validate recorded race gaps, carry compatible replay provenance through checkpoints, and establish green-lap eligibility before starting Phase 2.

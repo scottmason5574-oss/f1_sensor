@@ -23,4 +23,4 @@ Phase 1 validation is partial. Later phases depend on the evidence and tests bel
 
 ## Phase 1 validation evidence
 
-The [Phase 1 validation report](./CIRCLE_OF_DOOM_PHASE1_VALIDATION_REPORT.md) records the snapshot adapter, the tested epoch guard, and the remaining provenance and playback gates. Phase 2 readiness remains conditional.
+The [Phase 1 validation report](./CIRCLE_OF_DOOM_PHASE1_VALIDATION_REPORT.md) records the clocked live-delta path, the replay unavailable fallback, and the remaining reference-lap and verification gates. Phase 2 readiness remains conditional.
