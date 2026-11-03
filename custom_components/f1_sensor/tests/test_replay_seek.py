@@ -1426,3 +1426,100 @@ async def test_replay_pause_freezes_session_clock_without_replay_mode_flag(
     assert session_clock.data["clock_remaining_s"] == paused_remaining
 
     await controller.async_stop()
+
+
+@pytest.mark.asyncio
+async def test_gap_fallback_matches_linear_transport_and_cold_checkpoint(
+    hass, tmp_path
+):
+    """Synthetic archive with a correction, A/B/A, and a future timing frame."""
+    from custom_components.f1_sensor.analysis import Phase4AnalysisStore
+    from custom_components.f1_sensor.history import LapAnalysisStore
+    from custom_components.f1_sensor.replay_mode import ReplayTransport
+    from custom_components.f1_sensor.signalr import LiveBus
+
+    session = {"Key": "race", "Type": "Race"}
+    start = {
+        "Lines": {
+            "1": {"Position": "1"},
+            "2": {"Position": "2", "NumberOfLaps": 10, "GapToLeader": "+2"},
+        }
+    }
+    corrected = {"Lines": {"2": {"GapToLeader": "+3"}}}
+    lead_b = {"Lines": {"1": {"Position": "2"}, "2": {"Position": "1"}}}
+    lead_a = {"Lines": {"1": {"Position": "1"}, "2": {"Position": "2"}}}
+    frames = [
+        (0, "SessionInfo", session),
+        (1, "TimingData", start),
+        (1, "TimingData", corrected),
+        (2, "TimingData", lead_b),
+        (3, "TimingData", lead_a),
+        (1000, "TimingData", {"Lines": {"2": {"NumberOfLaps": 11}}}),
+        (2000, "TimingData", {"Lines": {"2": {"GapToLeader": "+999"}}}),
+    ]
+    controller, index, seek_bus, _ = await _setup_controller(
+        hass,
+        tmp_path,
+        initial_state={"SessionInfo": session},
+        frames=frames,
+        coordinators=(),
+    )
+    index.seek_checkpoints = [
+        {
+            "t": 3,
+            "state": {
+                "SessionInfo": session,
+                "TimingData": {
+                    "Lines": {
+                        "1": {"Position": "1"},
+                        "2": {"Position": "2", "NumberOfLaps": 10, "GapToLeader": "+3"},
+                    }
+                },
+            },
+        }
+    ]
+
+    def make_analysis(bus):
+        laps = LapAnalysisStore(bus, source_provider=lambda: "replay")
+        return laps, Phase4AnalysisStore(bus, laps, source_provider=lambda: "replay")
+
+    seek_laps, seek = make_analysis(seek_bus)
+    hass.data[DOMAIN][ENTRY_ID]["replay_reset_callbacks"] = (
+        _build_replay_reset_callbacks(seek_laps, seek)
+    )
+    try:
+        await controller.async_play()
+        await controller.async_seek_to_position(2)
+        seek_bus.injected.clear()
+        await controller.async_seek_to_position(1)
+        assert (
+            "TimingData",
+            index.seek_checkpoints[0]["state"]["TimingData"],
+        ) in seek_bus.injected
+        sought = seek.snapshot()["timing"]
+        assert sought[1]["laps_completed"] == 11
+        assert sought[1]["gap_to_leader"] == "+3"
+        assert "gap_observation" not in sought[1]
+        for speed in (2.0, 10.0):
+            transport = ReplayTransport(hass, index, speed_multiplier=speed)
+            bus = LiveBus(
+                hass, None, transport_factory=lambda transport=transport: transport
+            )
+            laps, linear = make_analysis(bus)
+            messages = transport.messages()
+            try:
+                async for message in messages:
+                    bus._process_payload(message)
+                    if transport._current_position_ms == 1000:
+                        break
+                assert linear.snapshot()["timing"] == sought
+                linear.reset_for_replay()
+                assert linear.snapshot()["timing"] == []
+            finally:
+                await messages.aclose()
+                await linear.async_close()
+                await laps.async_close()
+    finally:
+        await controller.async_stop()
+        await seek.async_close()
+        await seek_laps.async_close()

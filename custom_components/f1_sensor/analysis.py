@@ -10,9 +10,11 @@ from dataclasses import dataclass, replace
 import hashlib
 import math
 from statistics import median
+from time import time
 from typing import Any
 
 from .history import LapAnalysisStore
+from .signalr import LiveTimingDelta
 
 PHASE4_ANALYSIS_STREAMS = frozenset(
     {
@@ -649,6 +651,13 @@ class Phase4AnalysisStore:
         self._track_status: str | None = None
         self._drivers: dict[str, dict[str, Any]] = {}
         self._timing: dict[str, dict[str, Any]] = {}
+        self._gap_observations: dict[str, dict[str, Any]] = {}
+        self._gap_leader: str | None = None
+        self._gap_epoch = 0
+        self._gap_epoch_started: float | None = None
+        self._gap_generation: int | None = None
+        self._race_session = False
+        self._gap_watermark: float | None = None
         self._timing_app: dict[str, dict[str, Any]] = {}
         self._strategy_laps: OrderedDict[tuple[int, int], dict[str, Any]] = (
             OrderedDict()
@@ -784,6 +793,8 @@ class Phase4AnalysisStore:
         self._track_status = None
         self._drivers.clear()
         self._timing.clear()
+        self._invalidate_gap_epoch()
+        self._gap_watermark = None
         self._timing_app.clear()
         self._strategy_laps.clear()
         self._previous_positions.clear()
@@ -804,6 +815,7 @@ class Phase4AnalysisStore:
         self._reset_session()
         self._session_id = None
         self._session_name = None
+        self._race_session = False
         self._notify_listeners()
 
     def _on_session_info(self, payload: Any) -> None:
@@ -834,7 +846,13 @@ class Phase4AnalysisStore:
                 self._reset_session()
                 self._observed_streams.add("SessionInfo")
             self._session_id = session_id
+            self._race_session = False
         self._session_name = _text(payload.get("Name") or payload.get("Type"))
+        if session_type := _text(payload.get("Type")):
+            race_session = session_type.casefold() == "race"
+            if race_session != self._race_session:
+                self._invalidate_gap_epoch()
+            self._race_session = race_session
         if self._session_id:
             self._event(
                 identity="session_info",
@@ -923,14 +941,85 @@ class Phase4AnalysisStore:
         if not isinstance(payload, Mapping):
             return
         updated_drivers: list[int] = []
-        for key, item in _items(payload.get("Lines")):
+        lines = _items(payload.get("Lines"))
+        for key, item in lines:
             target = self._timing.setdefault(key, {})
             _deep_merge(target, item)
             if (driver := _as_int(key)) is not None:
                 updated_drivers.append(driver)
+        self._record_gap_updates(payload, lines)
         self._capture_strategy_laps(updated_drivers)
         self._detect_position_exchanges()
         self._detect_battles()
+
+    def _invalidate_gap_epoch(self) -> None:
+        self._gap_observations.clear()
+        self._gap_leader = None
+        self._gap_epoch += 1
+        self._gap_epoch_started = None
+
+    def _record_gap_updates(
+        self, payload: Any, lines: list[tuple[str, Mapping[str, Any]]]
+    ) -> None:
+        generation = getattr(self._bus, "timing_generation", None)
+        if generation != self._gap_generation:
+            self._invalidate_gap_epoch()
+            self._gap_watermark = None
+            self._gap_generation = generation
+        if (
+            not self._session_id
+            or not self._race_session
+            or self._provider() != "f1_live"
+            or not isinstance(payload, LiveTimingDelta)
+        ):
+            self._invalidate_gap_epoch()
+            return
+
+        source_time = payload.source_time
+        if self._gap_watermark is not None and source_time < self._gap_watermark:
+            # A retroactive classification can invalidate the observed anchor.
+            # An older gap-only update cannot supersede the current frame.
+            if any("Position" in item for _, item in lines):
+                self._invalidate_gap_epoch()
+            return
+        self._gap_watermark = source_time
+        leaders = [
+            key
+            for key, row in self._timing.items()
+            if _as_int(row.get("Position")) == 1
+        ]
+        leader = leaders[0] if len(leaders) == 1 else None
+        if leader != self._gap_leader:
+            # A transition delta can contain gaps from either side of the change.
+            self._invalidate_gap_epoch()
+            if any(
+                key == leader and _as_int(item.get("Position")) == 1
+                for key, item in lines
+            ):
+                self._gap_leader = leader
+                self._gap_epoch_started = source_time
+            return
+        if self._gap_epoch_started is None or source_time <= self._gap_epoch_started:
+            return
+
+        released_at = time()
+        for key, item in lines:
+            if key != leader and "GapToLeader" in item:
+                gap = _value_text(item["GapToLeader"])
+                previous = self._gap_observations.get(key)
+                if (
+                    previous is not None
+                    and previous["event_time"] == source_time
+                    and previous["gap"] == gap
+                ):
+                    continue
+                self._gap_observations[key] = {
+                    "gap": gap,
+                    "event_time": source_time,
+                    "released_at": released_at,
+                    "leader": _as_int(leader),
+                    "epoch": self._gap_epoch,
+                }
 
     def _current_stint(self, driver: int) -> tuple[int, Mapping[str, Any]]:
         app = self._timing_app.get(str(driver), {})
@@ -1267,8 +1356,16 @@ class Phase4AnalysisStore:
         state = self._timing.get(str(driver), {})
         return _as_float(state.get("IntervalToPositionAhead") or state.get("Interval"))
 
+    def _has_current_gap_context(self) -> bool:
+        return (
+            self._race_session
+            and self._provider() == "f1_live"
+            and self._gap_generation == getattr(self._bus, "timing_generation", None)
+        )
+
     def _timing_snapshot(self) -> list[dict[str, Any]]:
         timing: list[dict[str, Any]] = []
+        has_gap_context = self._has_current_gap_context()
         for driver_key, state in self._timing.items():
             driver = _as_int(driver_key)
             if driver is None:
@@ -1279,6 +1376,12 @@ class Phase4AnalysisStore:
                     "position": _as_int(state.get("Position")),
                     "laps_completed": _as_int(state.get("NumberOfLaps")),
                     "gap_to_leader": _value_text(state.get("GapToLeader")),
+                    **(
+                        {"gap_observation": dict(observation)}
+                        if has_gap_context
+                        and (observation := self._gap_observations.get(driver_key))
+                        else {}
+                    ),
                     "interval_to_ahead": _value_text(
                         state.get("IntervalToPositionAhead") or state.get("Interval")
                     ),
@@ -1426,6 +1529,10 @@ class Phase4AnalysisStore:
             "phase": self._phase(),
             "drivers": list(self._drivers.values()),
             "timing": self._timing_snapshot(),
+            "race_gap_epoch": self._gap_epoch,
+            "race_gap_source_time": self._gap_watermark
+            if self._has_current_gap_context()
+            else None,
             "timeline": {
                 "events": self._timeline.snapshot(),
                 "count": len(self._timeline.snapshot()),

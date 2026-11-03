@@ -61,6 +61,7 @@ LIVE_DATA_CARD_ASSET_FILENAMES = (
     "modular/session-data.js",
     "modular/team-radio-data.js",
     "modular/analysis-data.js",
+    "modular/race-gap.js",
     "modular/map-data.js",
     "modular/map-geometry.js",
     "modular/map-view.js",

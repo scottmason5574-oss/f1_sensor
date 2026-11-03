@@ -1107,6 +1107,10 @@ class _DelayedAnalysisBus:
             live_state=live_state,
         )
 
+    @property
+    def timing_generation(self) -> int:
+        return self._delay_queue_generation
+
     def subscribe(
         self, stream: str, handler: Callable[[Any], None]
     ) -> Callable[[], None]:

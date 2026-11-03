@@ -220,3 +220,135 @@ async def test_new_websocket_during_delay_gets_only_delivered_analysis(
         if entry.state == ConfigEntryState.LOADED:
             await hass.config_entries.async_unload(entry.entry_id)
         await hass.async_block_till_done()
+
+
+@pytest.mark.asyncio
+async def test_clocked_live_gaps_follow_delay_release_and_leadership(hass, monkeypatch):
+    from custom_components.f1_sensor.signalr import LiveBus
+
+    clock = SimpleNamespace(value=100.0)
+    monkeypatch.setattr(f1, "time", SimpleNamespace(monotonic=lambda: clock.value))
+    raw = LiveBus(hass, None)
+    state = LiveAvailabilityTracker()
+    state.set_state(True, "live_window")
+    delayed = f1._DelayedAnalysisBus(hass, raw, 30, None, state)
+    provider = SimpleNamespace(value="f1_live")
+    laps = LapAnalysisStore(delayed, source_provider=lambda: provider.value)
+    analysis = Phase4AnalysisStore(
+        delayed, laps, source_provider=lambda: provider.value
+    )
+
+    def send(second, lines):
+        raw._process_payload(
+            {
+                "M": [
+                    {
+                        "M": "feed",
+                        "A": [
+                            "TimingData",
+                            {"Lines": lines},
+                            f"2026-10-25T12:00:{second:02d}Z",
+                        ],
+                    }
+                ]
+            }
+        )
+
+    def advance(seconds):
+        clock.value += seconds
+        f1._drain_delayed_ingest_queue(delayed)
+
+    def observation():
+        snapshot = _analysis_payload(_runtime(analysis))
+        return next(
+            (
+                row.get("gap_observation")
+                for row in snapshot["timing"]
+                if row["driver_number"] == 3
+            ),
+            None,
+        )
+
+    try:
+        raw._process_payload({"R": {"SessionInfo": {"Key": "A", "Type": "Race"}}})
+        send(1, {"1": {"Position": "1"}, "2": {"Position": "2"}})
+        send(2, {"3": {"Position": "3", "GapToLeader": "+3.5"}})
+        assert observation() is None
+        advance(30)
+        first = observation()
+        assert first["gap"] == "+3.5"
+        assert first["event_time"] == 1792929602
+        assert first["released_at"] > 0
+
+        send(2, {"3": {"GapToLeader": "+4.5"}})
+        send(1, {"3": {"GapToLeader": "+9"}})
+        assert observation() == first
+        advance(30)
+        corrected = observation()
+        assert corrected["gap"] == "+4.5"
+        assert corrected["event_time"] == first["event_time"]
+        send(2, {"3": {"GapToLeader": "+4.5"}})
+        advance(30)
+        assert observation() == corrected
+        send(3, {"3": {"NumberOfLaps": 12}})
+        advance(30)
+        assert observation() == corrected
+
+        send(4, {"1": {"Position": "2"}, "2": {"Position": "1"}})
+        send(5, {"1": {"Position": "1"}, "2": {"Position": "2"}})
+        assert observation() == corrected
+        advance(30)
+        assert observation() is None
+        send(6, {"3": {"GapToLeader": "+1 LAP"}})
+        advance(30)
+        assert observation()["gap"] == "+1 LAP"
+        assert observation()["epoch"] != first["epoch"]
+
+        raw._process_payload(
+            {"R": {"TimingData": {"Lines": {"3": {"GapToLeader": "+90"}}}}}
+        )
+        send(3, {"1": {"Position": "1"}})
+        send(4, {"3": {"GapToLeader": "+91"}})
+        advance(30)
+        assert observation() is None
+
+        send(7, {"1": {"Position": "1"}})
+        send(8, {"3": {"GapToLeader": "+2"}})
+        advance(30)
+        assert observation()["gap"] == "+2"
+        raw._process_payload({"R": {"SessionInfo": {"Key": "A", "Type": "Qualifying"}}})
+        advance(30)
+        assert observation() is None
+        assert analysis.snapshot()["race_gap_source_time"] is None
+        raw._process_payload({"R": {"SessionInfo": {"Key": "A", "Type": "Race"}}})
+        send(9, {"1": {"Position": "1"}})
+        send(10, {"3": {"GapToLeader": "+2"}})
+        advance(30)
+        assert observation()["gap"] == "+2"
+
+        send(11, {"3": {"GapToLeader": "+1"}})
+        delayed.reset_for_replay()
+        assert observation() is None
+        advance(30)
+        assert observation() is None
+
+        provider.value = "replay"
+        state.set_state(True, "replay-mode")
+        analysis.reset_for_replay()
+        raw.inject_message("SessionInfo", {"Key": "B", "Type": "Race"})
+        raw.inject_message(
+            "TimingData",
+            {
+                "Lines": {
+                    "1": {"Position": "1"},
+                    "3": {"Position": "3", "GapToLeader": "+4"},
+                }
+            },
+        )
+        assert analysis.snapshot()["session_id"] == "B"
+        assert observation() is None
+        assert not delayed._delay_queue
+    finally:
+        await analysis.async_close()
+        await laps.async_close()
+        await delayed.async_close()

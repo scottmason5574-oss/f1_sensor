@@ -1,23 +1,20 @@
 # Home Assistant environment boundary
 
-F1 Sensor development and testing use HAdev at `hadev.local` (`/Volumes/config`), through the `mcp__homeassistant` toolset. The separate `mcp__homeassistant_native` toolset reaches Niklas's live production Home Assistant and is reserved for work in `/Volumes/config-1`. Never use the live server to develop, test, or debug this integration. Verify the target instance if a tool's identity is uncertain.
+Use the fork owner's designated isolated Ubuntu WSL development environment.
+Record the instance identity, Home Assistant version, endpoint, configuration
+root and approved access method. Verify the target before each deployment.
+Use dedicated configuration, credentials, loopback ports, storage and logs.
+Production and the upstream maintainer's Home Assistant instances are outside
+this workflow. Provision dependencies in an isolated user-space environment.
 
 # F1 Sensor source parity
 
-A completed F1 Sensor code change must exist in both the local Git checkout and
-the Home Assistant development instance. The corresponding integration trees
-are:
-
-- `/Users/niklas/GitHub/f1_sensor/custom_components/f1_sensor`
-- `/Volumes/config/custom_components/f1_sensor`
-
-Before editing or synchronizing, inspect both trees and preserve unrelated
-work. Synchronize every intended changed, added, renamed, or deleted file to
-both trees as part of the same task; do not use a blanket overwrite when either
-tree contains unrelated differences. Before reporting the code change as
-complete, require a byte-for-byte comparison of the complete integration trees
-to return no differences, excluding only runtime-generated cache artifacts such
-as `__pycache__`, `*.pyc`, and `.DS_Store`.
+Inspect the checkout and isolated instance's custom_components/f1_sensor
+directory before deployment. Preserve unrelated work and synchronize every
+intended addition, edit, rename and deletion from the reviewed Git commit.
+Require an identical complete file inventory and byte-for-byte comparison
+against the reviewed commit, excluding only runtime cache artifacts such as
+`__pycache__`, `*.pyc` and `.DS_Store`. Record the SHA and comparison result.
 
 # Local dev CI preflight
 
@@ -70,11 +67,14 @@ the agent's pre-commit quality gate; passing it does not replace the required
 remote checks after the user pushes with GitHub Desktop. A failed selected job
 cannot be excused as a skipped check or replaced by unrelated green evidence.
 
-If `/Volumes/config` is unavailable or unrelated changes prevent safe
-synchronization, report the limitation and do not call the code change
-complete. Source parity proves delivery to both file trees, not that Home
-Assistant has reloaded the integration or is running the new code; runtime
-activation must be verified separately when required.
+If the isolated target is unavailable or parity cannot be established, report
+the limitation and keep it as a merge gate. Restart or reload Home Assistant,
+confirm the config entry loads from the verified tree and record runtime
+results separately from CI. For timing changes, verify authenticated analysis
+snapshot delivery, timestamped TimingData, Live Delay release, replay seek and
+reset, source-generation isolation and runtime logs. Record synthetic coverage
+and real race-feed evidence separately. Missing required runtime evidence
+blocks merge.
 
 # Release notes and commit policy
 
