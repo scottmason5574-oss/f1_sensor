@@ -6,7 +6,7 @@ import json
 import logging
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from homeassistant import config_entries
 from homeassistant.helpers.entity_component import EntityComponent
@@ -1523,3 +1523,137 @@ async def test_gap_fallback_matches_linear_transport_and_cold_checkpoint(
         await controller.async_stop()
         await seek.async_close()
         await seek_laps.async_close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("has_start_marker", [True, False])
+async def test_synthetic_replay_gap_seek_equivalence(hass, tmp_path, has_start_marker):
+    """Compare real controller seeks with two chronological playback speeds."""
+    from custom_components.f1_sensor import _DelayedAnalysisBus, replay_mode
+    from custom_components.f1_sensor.analysis import Phase4AnalysisStore
+    from custom_components.f1_sensor.history import LapAnalysisStore
+    from custom_components.f1_sensor.replay_mode import ReplayTransport
+    from custom_components.f1_sensor.signalr import LiveBus
+
+    def timing(lines):
+        return "TimingData", {"Lines": lines}
+
+    a = {"1": {"Position": 1}, "2": {"Position": 2}}
+    b = {"1": {"Position": 2}, "2": {"Position": 1}}
+    frames = [
+        (0, "SessionInfo", {"Key": "synthetic", "Type": "Race"}),
+        (1, *timing(a)),
+        (1, "TeamRadio", {"Captures": {"0": {"Path": "synthetic-a"}}}),
+        (2, *timing({"2": {"GapToLeader": "+2"}})),
+        (3, *timing({"2": {"NumberOfLaps": 2}})),
+        (3, "TeamRadio", {"Captures": {"1": {"Path": "synthetic-b"}}}),
+        (4, *timing({"2": {"GapToLeader": "+3"}})),
+        (4, *timing({"2": {"GapToLeader": "+4"}})),
+        (5, *timing({"2": {"NumberOfLaps": 3}})),
+        (6, *timing(b)),
+        (7, *timing(a)),
+        (8, "SessionInfo", {"Key": "synthetic"}),
+        (8, *timing({"2": {"GapToLeader": "+1 LAP"}})),
+        (9, *timing({"2": {"GapToLeader": "+999"}})),
+    ]
+    if has_start_marker:
+        frames.insert(1, (0, "SessionStatus", {"Status": "Started"}))
+    controller, index, _, _ = await _setup_controller(
+        hass, tmp_path, initial_state={}, frames=frames, coordinators=()
+    )
+    # Exercise the production index scan at compressed synthetic intervals.
+    with patch.object(replay_mode, "SEEK_STATE_CHECKPOINT_INTERVAL_MS", 4):
+        scan = controller.session_manager._scan_merged_frames_sync(
+            index.frames_file, None
+        )
+    index.initial_state = scan["initial_state"]
+    index.seek_checkpoints = json.loads(json.dumps(scan["seek_checkpoints"]))
+
+    def make_analysis(bus):
+        laps = LapAnalysisStore(bus, source_provider=lambda: "replay")
+        return laps, Phase4AnalysisStore(bus, laps, source_provider=lambda: "replay")
+
+    expected = {}
+    for speed in (2.0, 10.0):
+        transport = ReplayTransport(hass, index, speed_multiplier=speed)
+        bus = LiveBus(
+            hass, None, transport_factory=lambda transport=transport: transport
+        )
+        laps, analysis = make_analysis(bus)
+        observed = {}
+        try:
+            async for message in transport.messages():
+                bus._process_payload(message)
+                observed[transport.get_playback_position_ms()] = analysis.snapshot()[
+                    "replay_race_gap"
+                ]
+        finally:
+            await transport.close()
+            await analysis.async_close()
+            await laps.async_close()
+        if expected:
+            assert observed == expected
+        expected = observed
+
+    assert expected[3]["observations"][0]["event_time"] == 0.002
+    assert expected[4]["observations"][0]["gap_seconds"] == 4
+    assert expected[7]["observations"] == []
+    assert expected[8]["observations"][0]["lap_deficit"] == 1
+
+    # Let the real bus normalize injected frames while keeping transport
+    # advancement under test control.
+    seek_bus = LiveBus(hass, None)
+    seek_bus.swap_transport = AsyncMock()
+    radio_frames = []
+    seek_bus.subscribe("TeamRadio", radio_frames.append)
+    controller._live_bus = seek_bus
+    delayed = _DelayedAnalysisBus(hass, seek_bus, 0, None, None)
+    seek_laps, seek = make_analysis(delayed)
+    hass.data[DOMAIN][ENTRY_ID]["replay_reset_callbacks"] = (
+        _build_replay_reset_callbacks(seek_laps, seek)
+    )
+    try:
+        await controller.async_seek_to_ms(4)
+        await controller.async_play()
+        assert seek.snapshot()["replay_race_gap"] == expected[4]
+        assert [next(iter(frame["Captures"])) for frame in radio_frames][-2:] == [
+            "0",
+            "1",
+        ]
+        with patch.object(replay_mode, "SEEK_CHECKPOINT_MIN_FORWARD_DELTA_MS", 4):
+            await controller.async_seek_to_ms(8)
+        assert seek.snapshot()["replay_race_gap"] == expected[8]
+        await controller.async_seek_to_ms(7)
+        assert seek.snapshot()["replay_race_gap"] == expected[7]
+        await controller.async_seek_to_ms(3)
+        assert seek.snapshot()["replay_race_gap"] == expected[3]
+        transport = controller._transport
+        messages = transport.messages()
+        try:
+            seek_bus._process_payload(await anext(messages))
+            assert (
+                seek.snapshot()["replay_race_gap"]["observations"][0]["gap_seconds"]
+                == 3
+            )
+            await controller.async_seek_to_ms(5)
+            assert seek.snapshot()["replay_race_gap"] == expected[5]
+        finally:
+            await messages.aclose()
+        await controller.async_seek_to_ms(3)
+        transport = controller._transport
+        messages = transport.messages()
+        try:
+            seek_bus._process_payload(await anext(messages))
+            seek_bus._process_payload(await anext(messages))
+            assert seek.snapshot()["replay_race_gap"] == expected[4]
+        finally:
+            await messages.aclose()
+        delayed.reset_for_replay()
+        assert seek.snapshot()["replay_race_gap"] is None
+        seek.reset_for_replay()
+        assert seek.snapshot()["replay_race_gap"] is None
+    finally:
+        await controller.async_stop()
+        await seek.async_close()
+        await seek_laps.async_close()
+        await delayed.async_close()

@@ -36,7 +36,13 @@ from .const import (
 )
 from .formation_start import FormationStartTracker
 from .helpers import CARDATA_MAX_LINE_BYTES, parse_cardata_lines
+from .replay_gap import ReplayGapState, replay_session_identity
 from .replay_start import ReplayStartReferenceController
+from .signalr import (
+    ReplayTimingCheckpoint,
+    ReplayTimingDelta,
+    ReplayUnclockedSessionInfo,
+)
 from .track_map import (
     TRACK_MAP_POSITION_STREAM,
     parse_position_z_line,
@@ -90,7 +96,9 @@ INDEX_STATUS_NO_DATA = "no_data"
 INDEX_STATUS_ERROR = "error"
 # Cache version - bump this when replay index contents change in a way that
 # requires re-downloading cached sessions.
-CACHE_VERSION = 15
+CACHE_VERSION = 16
+REPLAY_GAP_CHECKPOINT = "_replay_gap_checkpoint"
+REPLAY_FUTURE_SESSION_INFO = "_replay_future_session_info"
 FORMATION_SEARCH_WINDOW = timedelta(seconds=90)
 FORMATION_HTTP_TIMEOUT = 20
 SEEK_INDEX_INTERVAL_MS = 5_000
@@ -760,7 +768,9 @@ class ReplaySessionManager:
                 can_build_sync_markers = (
                     isinstance(cached_streams, list) and "LapCount" in cached_streams
                 )
-                if cached_version >= 11 and can_build_sync_markers:
+                if cached_version == CACHE_VERSION - 1 or (
+                    cached_version >= 11 and can_build_sync_markers
+                ):
                     _LOGGER.info(
                         "Upgrading cached replay index for %s with streaming scan",
                         session.unique_id,
@@ -1137,6 +1147,7 @@ class ReplaySessionManager:
         checkpoints: list[dict[str, Any]] = []
         accumulator = self._new_seek_checkpoint_accumulator()
         initial_state: dict[str, Any] | None = None
+        zero_offset_state: dict[str, Any] = {}
         formation_initial_state: dict[str, Any] | None = None
         first_payloads: dict[str, Any] = {}
         session_started_at_ms = 0
@@ -1153,6 +1164,7 @@ class ReplaySessionManager:
 
         def _flush_group() -> None:
             nonlocal initial_state
+            nonlocal zero_offset_state
             nonlocal session_started_at_ms
             nonlocal formation_initial_state
             nonlocal formation_started_at_ms
@@ -1204,9 +1216,10 @@ class ReplaySessionManager:
                         if formation_best_delta is None or delta < formation_best_delta:
                             formation_best_delta = delta
                             formation_started_at_ms = frame.timestamp_ms
-                            formation_initial_state = self._seek_checkpoint_state(
-                                accumulator
-                            )
+            if formation_started_at_ms == group_ms:
+                formation_initial_state = self._seek_checkpoint_state(accumulator)
+            if group_ms == 0:
+                zero_offset_state = self._seek_checkpoint_state(accumulator)
             if started_here and initial_state is None:
                 session_started_at_ms = group_ms
                 initial_state = self._seek_checkpoint_state(accumulator)
@@ -1264,7 +1277,9 @@ class ReplaySessionManager:
             _flush_group()
 
         if initial_state is None:
-            initial_state = {}
+            initial_state = zero_offset_state
+        if "SessionInfo" not in initial_state and "SessionInfo" in first_payloads:
+            initial_state[REPLAY_FUTURE_SESSION_INFO] = True
         for stream, payload in first_payloads.items():
             if stream != "PitStopSeries":
                 initial_state.setdefault(stream, payload)
@@ -1824,6 +1839,11 @@ class ReplaySessionManager:
             },
             "timingapp_state": {},
             "timingdata_state": {},
+            "replay_gaps": ReplayGapState(),
+            "gap_session_id": "",
+            "gap_race": False,
+            "gap_has_status": False,
+            "gap_session_info": {},
             "lap_history_state": {},
             "last_lap_times": {},
         }
@@ -1933,11 +1953,50 @@ class ReplaySessionManager:
             return
 
         state: dict[str, Any] = accumulator["state"]
+        if frame.stream == "SessionInfo":
+            session_id = replay_session_identity(frame.payload)
+            if session_id and (
+                session_id != accumulator["gap_session_id"]
+                or (
+                    str(frame.payload.get("SessionStatus")).strip() == "Inactive"
+                    and accumulator["gap_has_status"]
+                )
+            ):
+                if session_id != accumulator["gap_session_id"]:
+                    accumulator["gap_race"] = False
+                    accumulator["gap_session_info"].clear()
+                accumulator["gap_session_id"] = session_id
+                accumulator["gap_has_status"] = False
+                accumulator["replay_gaps"] = ReplayGapState()
+            gap_info = accumulator["gap_session_info"]
+            if session_id:
+                for key in ("Meeting", "Key", "SessionKey", "Path", "Name"):
+                    gap_info.pop(key, None)
+                    if key in frame.payload:
+                        gap_info[key] = frame.payload[key]
+            session_type = str(frame.payload.get("Type") or "").strip()
+            if session_type:
+                is_race = session_type.casefold() == "race"
+                if is_race != accumulator["gap_race"]:
+                    accumulator["replay_gaps"] = ReplayGapState()
+                accumulator["gap_race"] = is_race
+                gap_info["Type"] = session_type
+        elif frame.stream == "SessionStatus":
+            accumulator["gap_has_status"] |= bool(
+                str(
+                    frame.payload.get("Status") or frame.payload.get("Message") or ""
+                ).strip()
+            )
         if frame.stream == "TopThree":
             self._merge_topthree_state(accumulator["topthree_state"], frame.payload)
         elif frame.stream == "TimingAppData":
             self._merge_timingapp_state(accumulator["timingapp_state"], frame.payload)
         elif frame.stream == "TimingData":
+            if accumulator["gap_session_id"] and accumulator["gap_race"]:
+                accumulator["replay_gaps"].apply_payload(
+                    frame.timestamp_ms / 1000 if frame.timestamp_ms > 0 else None,
+                    frame.payload,
+                )
             self._merge_lap_history_state(
                 accumulator["lap_history_state"],
                 accumulator["last_lap_times"],
@@ -1970,6 +2029,8 @@ class ReplaySessionManager:
         accumulator: dict[str, Any],
     ) -> dict[str, Any]:
         state = deepcopy(accumulator["state"])
+        if "SessionInfo" in state:
+            state["SessionInfo"].update(deepcopy(accumulator["gap_session_info"]))
         topthree_state = accumulator["topthree_state"]
         if topthree_state["lines"] != [None, None, None]:
             state["TopThree"] = {
@@ -1984,6 +2045,7 @@ class ReplaySessionManager:
         timingdata_state = accumulator["timingdata_state"]
         if self._has_timingdata_state(timingdata_state):
             state["TimingData"] = deepcopy(timingdata_state)
+        state[REPLAY_GAP_CHECKPOINT] = accumulator["replay_gaps"].checkpoint()
 
         lap_history_state = accumulator["lap_history_state"]
         if self._has_lap_history_state(lap_history_state):
@@ -2444,6 +2506,7 @@ class ReplayTransport:
         self._pause_event = asyncio.Event()
         self._pause_event.set()  # Not paused initially
         self._current_position_ms = self._resolve_start_ms()
+        self.frames_at_position = 0
         self._playback_start_ms = self._current_position_ms
         self._playback_started_at: float | None = None
         self._pause_started_at: float | None = None
@@ -2473,6 +2536,7 @@ class ReplayTransport:
         """Yield replay frames as SignalR-compatible messages."""
         start_ms = self._resolve_start_ms()
         self._current_position_ms = start_ms
+        self.frames_at_position = 0
         self._playback_start_ms = start_ms
         self._playback_started_at = time.monotonic()
         self._total_paused_duration = 0.0
@@ -2569,7 +2633,10 @@ class ReplayTransport:
                 if delay_ms > 10:  # Only sleep if > 10ms
                     await asyncio.sleep(delay_ms / 1000)
 
+                if frame_ms != self._current_position_ms:
+                    self.frames_at_position = 0
                 self._current_position_ms = frame_ms
+                self.frames_at_position += 1
                 self._notify_listeners()
 
                 yielded_count += 1
@@ -2582,6 +2649,13 @@ class ReplayTransport:
                         yielded_count,
                         frame_ms,
                     )
+
+                if (
+                    stream == "TimingData"
+                    and isinstance(payload, dict)
+                    and frame_ms > 0
+                ):
+                    payload = ReplayTimingDelta(payload, frame_ms / 1000)
 
                 # Yield in SignalR format
                 yield {
@@ -2859,9 +2933,15 @@ class ReplayController:
         start_exclusive_ms: int,
         end_inclusive_ms: int,
         seek_index: list[dict[str, int]] | None = None,
+        delivered_at_start: int = 0,
     ) -> list[ReplayFrame]:
         frames: list[ReplayFrame] = []
-        start_offset = _seek_offset_for_ms(seek_index, start_exclusive_ms)
+        # A paused transport can have delivered only part of a timestamp group.
+        include_boundary = delivered_at_start > 0
+        index_boundary = (
+            start_exclusive_ms - 1 if include_boundary else start_exclusive_ms
+        )
+        start_offset = _seek_offset_for_ms(seek_index, index_boundary)
         with open(frames_file, "rb") as handle:
             if start_offset > 0:
                 handle.seek(start_offset)
@@ -2875,8 +2955,14 @@ class ReplayController:
                 try:
                     frame = json.loads(line)
                     frame_ms = int(frame["t"])
-                    if frame_ms <= start_exclusive_ms:
+                    if frame_ms < start_exclusive_ms:
                         continue
+                    if frame_ms == start_exclusive_ms:
+                        if not include_boundary:
+                            continue
+                        if delivered_at_start > 0:
+                            delivered_at_start -= 1
+                            continue
                     if frame_ms > end_inclusive_ms:
                         break
                     frames.append(
@@ -2914,6 +3000,7 @@ class ReplayController:
         start_exclusive_ms: int,
         end_inclusive_ms: int,
         coalesce_position_z: bool = False,
+        delivered_at_start: int = 0,
     ) -> None:
         if end_inclusive_ms <= start_exclusive_ms:
             return
@@ -2925,6 +3012,7 @@ class ReplayController:
                 start_exclusive_ms=start_exclusive_ms,
                 end_inclusive_ms=end_inclusive_ms,
                 seek_index=index.seek_index,
+                delivered_at_start=delivered_at_start,
             )
         )
         if not self._control_is_current(index, generation):
@@ -2936,7 +3024,10 @@ class ReplayController:
             if not self._control_is_current(index, generation):
                 return
             if isinstance(frame.payload, dict):
-                self._live_bus.inject_message(frame.stream, frame.payload)
+                payload = frame.payload
+                if frame.stream == "TimingData" and frame.timestamp_ms > 0:
+                    payload = ReplayTimingDelta(payload, frame.timestamp_ms / 1000)
+                self._live_bus.inject_message(frame.stream, payload)
             if (
                 frame_number % REPLAY_CATCHUP_BATCH_FRAMES == 0
                 or self._hass.loop.time() >= deadline
@@ -3018,7 +3109,16 @@ class ReplayController:
             len(initial_state),
             list(initial_state.keys()),
         )
+        provenance = initial_state.get(REPLAY_GAP_CHECKPOINT)
         for stream, payload in initial_state.items():
+            if stream in {REPLAY_GAP_CHECKPOINT, REPLAY_FUTURE_SESSION_INFO}:
+                continue
+            if stream == "SessionInfo" and initial_state.get(
+                REPLAY_FUTURE_SESSION_INFO
+            ):
+                payload = ReplayUnclockedSessionInfo(payload)
+            if stream == "TimingData" and isinstance(payload, dict) and provenance:
+                payload = ReplayTimingCheckpoint(payload, provenance)
             if isinstance(payload, dict):
                 self._live_bus.inject_message(stream, payload)
 
@@ -3125,6 +3225,10 @@ class ReplayController:
         self._set_state(ReplayState.SEEKING)
         self._pending_start_ms = target_ms
 
+        delivered_at_start = 0
+        if self._transport is not None:
+            current_ms = self._transport.get_playback_position_ms()
+            delivered_at_start = self._transport.frames_at_position
         await self._stop_active_replay_transport()
         if not self._control_is_current(index, generation):
             return
@@ -3183,6 +3287,7 @@ class ReplayController:
                 start_exclusive_ms=current_ms,
                 end_inclusive_ms=target_ms,
                 coalesce_position_z=True,
+                delivered_at_start=delivered_at_start,
             )
 
         await asyncio.sleep(0)

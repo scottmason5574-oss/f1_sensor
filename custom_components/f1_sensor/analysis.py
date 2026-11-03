@@ -9,12 +9,19 @@ from copy import deepcopy
 from dataclasses import dataclass, replace
 import hashlib
 import math
+import re
 from statistics import median
 from time import time
 from typing import Any
 
 from .history import LapAnalysisStore
-from .signalr import LiveTimingDelta
+from .replay_gap import ReplayGapState, replay_session_identity
+from .signalr import (
+    LiveTimingDelta,
+    ReplayTimingCheckpoint,
+    ReplayTimingDelta,
+    ReplayUnclockedSessionInfo,
+)
 
 PHASE4_ANALYSIS_STREAMS = frozenset(
     {
@@ -656,6 +663,10 @@ class Phase4AnalysisStore:
         self._gap_epoch = 0
         self._gap_epoch_started: float | None = None
         self._gap_generation: int | None = None
+        self._replay_gaps = ReplayGapState()
+        self._replay_gap_checkpoint_offset: float | None = None
+        self._replay_gap_session_observed = False
+        self._replay_gap_generation: int | None = None
         self._race_session = False
         self._gap_watermark: float | None = None
         self._timing_app: dict[str, dict[str, Any]] = {}
@@ -788,6 +799,9 @@ class Phase4AnalysisStore:
         )
 
     def _reset_session(self) -> None:
+        self._replay_gaps = ReplayGapState()
+        self._replay_gap_checkpoint_offset = None
+        self._replay_gap_session_observed = False
         self._timeline.clear()
         self._session_status = None
         self._track_status = None
@@ -822,14 +836,7 @@ class Phase4AnalysisStore:
         if not isinstance(payload, Mapping):
             return
         meeting = _mapping(payload.get("Meeting"))
-        parts = (
-            _text(meeting.get("Key") or meeting.get("Id")),
-            _text(
-                payload.get("Key") or payload.get("SessionKey") or payload.get("Path")
-            ),
-            _text(payload.get("Name")),
-        )
-        session_id = ":".join(part for part in parts if part)
+        session_id = replay_session_identity(payload)
         restarting_same_replay = (
             self._provider() == "replay"
             and session_id
@@ -847,11 +854,17 @@ class Phase4AnalysisStore:
                 self._observed_streams.add("SessionInfo")
             self._session_id = session_id
             self._race_session = False
+        if session_id and self._provider() == "replay":
+            self._replay_gap_session_observed = not isinstance(
+                payload, ReplayUnclockedSessionInfo
+            )
         self._session_name = _text(payload.get("Name") or payload.get("Type"))
         if session_type := _text(payload.get("Type")):
             race_session = session_type.casefold() == "race"
             if race_session != self._race_session:
                 self._invalidate_gap_epoch()
+                self._replay_gaps = ReplayGapState()
+                self._replay_gap_checkpoint_offset = None
             self._race_session = race_session
         if self._session_id:
             self._event(
@@ -947,6 +960,33 @@ class Phase4AnalysisStore:
             _deep_merge(target, item)
             if (driver := _as_int(key)) is not None:
                 updated_drivers.append(driver)
+        if self._provider() == "replay" and self._replay_gap_session_observed:
+            generation = getattr(self._bus, "timing_generation", None)
+            if generation != self._replay_gap_generation:
+                self._replay_gaps = ReplayGapState()
+                self._replay_gap_checkpoint_offset = None
+                self._replay_gap_generation = generation
+            offset = (
+                payload.offset
+                if self._replay_gap_session_observed
+                and self._race_session
+                and isinstance(payload, ReplayTimingDelta)
+                else None
+            )
+            if (
+                self._replay_gap_session_observed
+                and self._race_session
+                and isinstance(payload, ReplayTimingCheckpoint)
+            ):
+                self._replay_gaps = ReplayGapState.restore(payload.provenance)
+                self._replay_gap_checkpoint_offset = self._replay_gaps.as_of
+            elif (
+                offset is None
+                or self._replay_gap_checkpoint_offset is None
+                or offset > self._replay_gap_checkpoint_offset
+            ):
+                self._replay_gap_checkpoint_offset = None
+                self._replay_gaps.apply_payload(offset, payload)
         self._record_gap_updates(payload, lines)
         self._capture_strategy_laps(updated_drivers)
         self._detect_position_exchanges()
@@ -1363,6 +1403,45 @@ class Phase4AnalysisStore:
             and self._gap_generation == getattr(self._bus, "timing_generation", None)
         )
 
+    def _replay_gap_snapshot(self) -> dict[str, Any] | None:
+        if not self._race_session or self._replay_gap_generation != getattr(
+            self._bus, "timing_generation", None
+        ):
+            return None
+        gaps = self._replay_gaps
+        if gaps.as_of is None or gaps.leader is None:
+            return None
+        observations = []
+        for driver, (offset, value) in gaps.observations.items():
+            number = _as_int(driver)
+            if number is None or number <= 0:
+                continue
+            raw = _value_text(value)
+            numeric = (
+                _as_float(raw)
+                if raw and re.fullmatch(r"[+-]?[0-9]+(?:\.[0-9]+)?", raw)
+                else None
+            )
+            deficit = re.fullmatch(r"\+?([0-9]{1,15})\s+LAPS?", raw or "", re.I)
+            observations.append(
+                {
+                    "driver_number": number,
+                    "event_time": offset,
+                    "gap": raw,
+                    "lap_deficit": (int(deficit[1]) or None) if deficit else None,
+                    "gap_seconds": (
+                        numeric if numeric is not None and numeric >= 0 else None
+                    ),
+                }
+            )
+        return {
+            "clock": "replay_relative_seconds",
+            "as_of": gaps.as_of,
+            "leader": _as_int(gaps.leader),
+            "epoch": gaps.epoch,
+            "observations": observations,
+        }
+
     def _timing_snapshot(self) -> list[dict[str, Any]]:
         timing: list[dict[str, Any]] = []
         has_gap_context = self._has_current_gap_context()
@@ -1516,6 +1595,24 @@ class Phase4AnalysisStore:
             return "after"
         return "before"
 
+    def _reference_lap_snapshot(self) -> dict[str, Any]:
+        candidates = []
+        if not self._session_id or not self._race_session:
+            reason = "race_session_unavailable"
+        elif self._provider() == "replay":
+            # Bootstrap timing and replay checkpoints contain merged lap fields
+            # without per-lap availability or continuous eligibility evidence.
+            reason = "replay_lap_provenance_unavailable"
+        else:
+            candidates = self._lap_analysis.reference_lap_candidates(self._session_id)
+            reason = "eligibility_unverified" if candidates else "no_lap_candidates"
+        return {
+            "duration_seconds": None,
+            "sample_count": 0,
+            "reason": reason,
+            "candidates": candidates,
+        }
+
     def snapshot(self) -> dict[str, Any]:
         """Return the bounded Phase 4 dashboard product."""
         strategy = analyze_strategy(list(self._strategy_laps.values()), self._drivers)
@@ -1529,6 +1626,12 @@ class Phase4AnalysisStore:
             "phase": self._phase(),
             "drivers": list(self._drivers.values()),
             "timing": self._timing_snapshot(),
+            "reference_lap": self._reference_lap_snapshot(),
+            **(
+                {"replay_race_gap": self._replay_gap_snapshot()}
+                if self._provider() == "replay"
+                else {}
+            ),
             "race_gap_epoch": self._gap_epoch,
             "race_gap_source_time": self._gap_watermark
             if self._has_current_gap_context()

@@ -6,7 +6,7 @@ description: Circle of Doom implementation readiness for F1 Sensor.
 
 # Circle of Doom implementation readiness
 
-Phase 1 validation is partial. Later phases depend on the evidence and tests below.
+M1C contracts and synthetic regression coverage are implemented. Standalone synthetic runtime checks passed on Home Assistant 2026.9.0, and production reference-lap eligibility remains unavailable without whole-lap evidence.
 
 | Feature | Existing support | Backend need | Frontend and calculation | Tests and dependencies | Readiness and unknowns |
 | --- | --- | --- | --- | --- | --- |
@@ -23,4 +23,4 @@ Phase 1 validation is partial. Later phases depend on the evidence and tests bel
 
 ## Phase 1 validation evidence
 
-The [Phase 1 validation report](./CIRCLE_OF_DOOM_PHASE1_VALIDATION_REPORT.md) records the clocked live-delta path, the replay unavailable fallback, and the remaining reference-lap and verification gates. Phase 2 readiness remains conditional.
+The [M1C validation report](./CIRCLE_OF_DOOM_M1C_VALIDATION_REPORT.md) records Task 4A test evidence and the completed Task 4B standalone runtime checks. Phase 2 readiness remains conditional.

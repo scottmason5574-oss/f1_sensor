@@ -832,6 +832,26 @@ class LapAnalysisStore:
         lap = self._laps.get((driver, lap_number))
         return lap.as_dict() if lap is not None else None
 
+    def reference_lap_candidates(self, session_id: str) -> list[dict[str, Any]]:
+        """Project recent observed lap records without certifying eligibility.
+
+        Sparse timing fields can be inherited from a previous lap. Track status
+        is lap context sampled on ingestion and race-control deletion matching
+        is heuristic. These records cannot attest to full-lap eligibility.
+        """
+        if self._active_session_id != session_id:
+            return []
+        return [
+            {
+                "driver_number": lap.driver_number,
+                "lap_number": lap.lap_number,
+                "reported_duration_seconds": lap.lap_duration,
+                "eligibility": "unknown",
+            }
+            for key in self._order[-20:]
+            if (lap := self._laps.get(key)) is not None
+        ]
+
     def snapshot(self) -> dict[str, Any]:
         """Return bounded live/replay lap analytics for a WebSocket consumer."""
         laps = [self._laps[key] for key in self._order if key in self._laps]

@@ -589,6 +589,26 @@ class SignalRCoreClient:
         return value
 
 
+class ReplayUnclockedSessionInfo(dict[str, Any]):
+    """Bootstrap session metadata first observed after the replay baseline."""
+
+
+class ReplayTimingCheckpoint(dict[str, Any]):
+    """Merged timing bootstrap with separate archived gap provenance."""
+
+    def __init__(self, payload: dict[str, Any], provenance: dict[str, Any]) -> None:
+        super().__init__(payload)
+        self.provenance = provenance
+
+
+class ReplayTimingDelta(dict[str, Any]):
+    """TimingData with its archive offset in seconds."""
+
+    def __init__(self, payload: dict[str, Any], offset: float) -> None:
+        super().__init__(payload)
+        self.offset = offset
+
+
 class LiveTimingDelta(dict[str, Any]):
     """TimingData delta with the UTC stamp from its live feed envelope."""
 
@@ -874,7 +894,19 @@ class LiveBus:
     ) -> None:
         with suppress(Exception):
             provider = "replay" if self._transport_factory is not None else "f1_live"
+            replay_offset = data.offset if isinstance(data, ReplayTimingDelta) else None
+            checkpoint = (
+                data.provenance if isinstance(data, ReplayTimingCheckpoint) else None
+            )
+            unclocked_session = isinstance(data, ReplayUnclockedSessionInfo)
             data = self._provider_registry.normalize(provider, stream, data).payload
+            if isinstance(data, dict):
+                if unclocked_session:
+                    data = ReplayUnclockedSessionInfo(data)
+                elif checkpoint is not None:
+                    data = ReplayTimingCheckpoint(data, checkpoint)
+                elif replay_offset is not None:
+                    data = ReplayTimingDelta(data, replay_offset)
             if (
                 provider == "f1_live"
                 and source_time is not None
