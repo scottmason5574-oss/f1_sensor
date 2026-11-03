@@ -67,3 +67,35 @@ The independent reviewer identified conflated source and release clock naming, s
 Driver metadata, classification, completed laps, and unavailable-state display have inputs. Live follower separation is conditional on clocked race deltas, explicit leader acquisition and a validated consumer clock. Replay follower separation, eligible reference duration, lapped residual phase and full animation remain gated.
 
 **NOT READY — BLOCKERS REMAIN.** Keep PR #2 draft.
+
+## Final merge-readiness follow-up
+
+The clean checkout at 6dff0f96b7ecd397b3472730786813d9993b4e6e passed the full local changed verifier with fork main as its base. All six selected lanes passed. The backend reported 2,131 tests and 96.607% runtime line coverage. Browser suites reported 287 frontend, 7 translation and 16 documentation tests. The verifier recorded source fingerprint aa189ef126e3.
+
+The [manual PR verification](https://github.com/scottmason5574-oss/f1_sensor/actions/runs/41630339157) ran from fork main and reported against PR #2 at that exact head. Backend, frontend, lint, documentation, translations, package and hassfest passed. The [validation job](https://github.com/scottmason5574-oss/f1_sensor/actions/runs/41630339157/job/125898174787) failed HACS because the fork has no valid repository topics and Issues are disabled. This is a fork repository prerequisite. The owner must address those prerequisites before rerunning verification.
+
+AGENTS.md names the upstream maintainer's HAdev instance. This session has no HAdev connector and hadev.local did not resolve. Source parity is outstanding. It requires a fork-authorized development instance or a maintainer-approved fork-specific disposition.
+
+The final combined diff and whitespace check were reviewed against fork main. Keep PR #2 draft. HAdev parity and timing evidence gates remain open. This evidence is recorded locally to preserve the exact SHA covered by the hosted run and local verifier.
+
+### Fork readiness update
+
+The fork now has Issues enabled and topics formula-1, hacs and home-assistant. The [successful manual verification](https://github.com/scottmason5574-oss/f1_sensor/actions/runs/41633243818) tested PR #2 at 6dff0f96b7ecd397b3472730786813d9993b4e6e. All selected lanes passed, including [HACS and hassfest](https://github.com/scottmason5574-oss/f1_sensor/actions/runs/41633243818/job/125908006920) and the [final required verdict](https://github.com/scottmason5574-oss/f1_sensor/actions/runs/41633243818/job/125909939055). Foundation code is CI-green. Runtime parity and the full M1 timing evidence remain outstanding.
+
+### Proposed replacement for the HAdev boundary and source-parity sections of AGENTS.md
+
+> For fork changes, use an owner-designated isolated Home Assistant development instance with a dedicated configuration and integration directory. Record the instance identifier, endpoint, approved access method, HA version and configuration root before synchronization. Verify the target identity before every deployment. Production instances are outside this workflow.
+>
+> Inspect the checkout and development integration tree, preserve unrelated work, and synchronize the intended changes from the reviewed SHA. Compare the complete integration trees byte-for-byte, excluding runtime caches only. Reload or restart the isolated instance and verify that it runs the reviewed source. Record the SHA, parity result and runtime checks. For timing changes, exercise analysis websocket delivery, Live Delay release and replay seek/reset with deterministic fixtures and record any live-feed coverage separately.
+>
+> If no approved isolated instance is available or parity cannot be established, record runtime validation as outstanding and keep it as a merge gate. Local and hosted CI are separate evidence.
+
+This was the proposal presented for owner review. The approved policy and designated target are recorded below.
+
+### Owner-approved Ubuntu WSL runtime validation
+
+The fork owner designated isolated Ubuntu WSL and approved the corresponding AGENTS.md amendment. Home Assistant 2026.9.0 ran in a fresh Python 3.14.4 user-space environment on loopback port 18764 with a dedicated config root, test account, storage and logs. F1 Sensor was installed through the Home Assistant config flow with Race Control enabled. The entry reached loaded state and an authenticated websocket client subscribed and received an analysis snapshot at protocol version 1.
+
+All 357 files under the running configuration's custom_components/f1_sensor directory matched the Git blobs at 6dff0f96b7ecd397b3472730786813d9993b4e6e, with only permitted runtime caches excluded. The policy and report changes do not modify the integration tree. The standalone host logged optional FFmpeg, TurboJPEG and Assist dependencies failing to initialize. The F1 Sensor startup and analysis subscription succeeded. Synthetic timestamped TimingData, Live Delay, replay seek/reset and source-generation isolation passed in the separate Home Assistant harness. A standalone restart probe loaded the persisted entry and injected timestamped TimingData with the live supervisor stopped. It verified delayed release, replay reset and queued-generation isolation. A local synthetic JSONL archive exercised forward and backward replay seek, with no future-frame leakage or live gap provenance. Real Formula 1 feed evidence remains outstanding.
+
+The unchanged 10-client dispatch p95 budget is 50 ms. In five interleaved runs each, fork main (ee2f621ff3cd5a5937ea59df9991c07746d2edd7) measured 77.566 to 81.579 ms with median 78.886 ms. The Phase 1 integration measured 77.681 to 80.487 ms with median 78.344 ms. All runs delivered websocket updates and exceeded the same dispatch budget. This reproduces the failure on the baseline and does not establish a Phase 1 slowdown or an exact cause for the shared overrun. Keep the threshold and record the benchmark as failing on this host.
