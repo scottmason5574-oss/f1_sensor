@@ -20,3 +20,7 @@ Phase 1 is ready for approval. Later phases depend on the evidence and tests bel
 | SC/VSC and red flags | TrackStatus | Ordered transitions over estimation windows | Scenario rules and confidence | Green, mixed, SC, VSC and red | Calibration required |
 | Inner lane and arcs | Physical map and pit information | Confirm pit-state timestamps | Independent SVG overlays and lane transitions | Entry/exit and dense layouts | Deferred; exact overlay meanings unknown |
 | Delay and replay | Existing routing and controllers | Prove coherent as-of snapshots and seek reconstruction | Consume one clock and reset on discontinuities | Cold seek, delay changes, no future leak | Cross-cutting gate |
+
+## Phase 1 validation evidence
+
+The [Phase 1 validation report](./CIRCLE_OF_DOOM_PHASE1_VALIDATION_REPORT.md) records a tested gap projection and the source metadata still needed to apply it to live and replay observations. Phase 2 readiness remains conditional.

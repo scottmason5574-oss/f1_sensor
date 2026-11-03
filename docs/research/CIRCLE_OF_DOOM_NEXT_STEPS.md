@@ -13,3 +13,5 @@ description: Circle of Doom next steps for F1 Sensor.
 5. Report the field contract, test evidence and readiness decision before starting the circle renderer.
 
 See the [implementation plan](./CIRCLE_OF_DOOM_IMPLEMENTATION_PLAN.md) for exit criteria. Later investigations should prioritize stop-to-lap alignment and held-out rejoin validation. MultiViewer overlay parity can proceed separately if runtime evidence becomes available.
+
+The [Phase 1 validation report](./CIRCLE_OF_DOOM_PHASE1_VALIDATION_REPORT.md) identifies per-field event and availability times, leader anchor epochs, and lap interval coverage as outstanding inputs.
