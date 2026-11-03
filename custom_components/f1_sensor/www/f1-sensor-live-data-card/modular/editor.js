@@ -434,6 +434,7 @@ export class F1SensorCardEditor extends LitElement {
     </section>`;
   }
   optionName(value) {
+    if (value === 'physical' || value === 'circular') return this.w(`modular.map_view_${value}`);
     const calendarLabels = { none: ['None'], round: ['Round'], circuit: ['Circuit'], location: ['Location'], show: ['Show'], dim: ['Mark past starts'], label: ['Show label'] };
     if (calendarLabels[value]) return this.w(...calendarLabels[value]);
     if (value === 'time_s') return this.w('modular.time_from_lap_start_s');

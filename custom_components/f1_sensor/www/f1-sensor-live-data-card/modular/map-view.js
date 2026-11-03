@@ -2,10 +2,17 @@ const version = new URL(import.meta.url).searchParams.get('v');
 const load = path => import(`${path}${version ? `?v=${encodeURIComponent(version)}` : ''}`);
 const [{ LitElement, html, svg, css, repeat }, { sharedStyles, words, dateTime }, { displayTrack }] = await Promise.all([load('../f1-lit-3.3.2.js'), load('./view.js'), load('./map-geometry.js')]);
 class F1TrackMapView extends LitElement {
-  static properties = { model: { attribute: false }, module: { attribute: false }, settings: { attribute: false }, width: { state: true }, selected: { state: true }, listOpen: { state: true } };
+  static properties = { model: { attribute: false }, module: { attribute: false }, settings: { attribute: false }, width: { state: true }, selected: { state: true }, listOpen: { state: true }, viewMode: { state: true } };
   static styles = [sharedStyles, css`
     .map-frame { border:1px solid var(--f1-border); border-radius:10px; background:var(--f1-panel); }
     .map-shell { display:grid; gap:12px; }
+    .map-view-controls { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:12px; }
+    .map-view-controls button { min-height:44px; max-width:100%; overflow-wrap:anywhere; }
+    .circle-shell { display:grid; gap:8px; min-width:0; padding:12px; text-align:center; }
+    .circle-shell h3,.circle-shell p { margin:0; }
+    .circle-shell svg { max-width:320px; margin-inline:auto; }
+    .circle-reference { fill:var(--f1-text); }
+    @media(forced-colors:active) { .circle-reference { fill:CanvasText; } }
     .map-shell.compact { gap:8px; }
     .map-shell.full { gap:16px; }
     .map-meta,.map-footer { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:8px 14px; color:var(--f1-muted); }
@@ -44,6 +51,10 @@ class F1TrackMapView extends LitElement {
     .annotation-unavailable { margin:0; color:var(--f1-muted); font-size:.82em; }
     .driver-list { display:grid; gap:6px; list-style:none; margin:14px 0 0; padding:0; }
     .driver-list button { width:100%; display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:6px 12px; text-align:left; }
+    .circle-roster { margin-top:12px; min-width:0; }
+    .circle-roster h3 { margin:0; }
+    .circle-roster button { min-height:44px; border-inline-start:4px solid var(--team-accent); overflow-wrap:anywhere; }
+    @media(forced-colors:active) { .map-view-controls button[aria-pressed=true],.circle-roster button[aria-pressed=true] { border-block-end:3px solid ButtonText; } }
     .driver-list small { display:block; font-size:.8em; }
     @media(forced-colors:active) { .track,.marker circle,.annotation-line,.annotation-feature-tick,.annotation-leader { stroke:CanvasText!important; } .marker text,.annotation-number,.annotation-feature-text,.annotation-tag-text { fill:CanvasText!important; stroke:Canvas!important; } .marker .team { display:none; } }
   `];
@@ -62,12 +73,22 @@ class F1TrackMapView extends LitElement {
   willUpdate(changed) {
     const sessionChanged = this.model?.sessionKey !== this.sessionKey;
     if (sessionChanged) { this.sessionKey = this.model?.sessionKey; this.selected = ''; }
-    if (changed.has('model') || changed.has('settings')) this.syncMotion(sessionChanged, changed.has('model'));
+    if (changed.has('module') && this.module?.options?.view_mode !== changed.get('module')?.options?.view_mode) {
+      this.viewMode = this.module?.options?.view_mode;
+    }
+    if (this.viewMode === 'circular') {
+      this.motions.clear();
+      if (this.motionFrame) cancelAnimationFrame(this.motionFrame);
+      this.motionFrame = 0;
+    } else if (changed.has('model') || changed.has('settings') || changed.has('viewMode')) {
+      this.syncMotion(sessionChanged, changed.has('model'));
+    }
     if (changed.has('module')) {
       const showList = this.module?.fields.includes('map_drivers');
       if (showList !== this.showList) { this.listOpen = Boolean(showList); this.showList = showList; }
     }
-    if (this.selected && !this.model?.rows.some(row => row.id === this.selected)) this.selected = '';
+    const rows = this.viewMode === 'circular' ? this.model?.roster : this.model?.rows;
+    if (this.selected && (this.model?.seeking || !rows?.some(row => row.id === this.selected))) this.selected = '';
   }
   reducedMotion() {
     return this.settings?.accessibility?.motion === 'reduced' || globalThis.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
@@ -128,6 +149,12 @@ class F1TrackMapView extends LitElement {
     return this.settings.appearance.team_colors && /^[0-9a-f]{6}$/i.test(value) ? `#${value}` : 'transparent';
   }
   w(source, replacements = {}) { return words(this.settings?.language, source, replacements); }
+  driverStatus(row) {
+    const value = String(row.status ?? '').trim().toLowerCase().replaceAll('_', '');
+    const labels = { ontrack: 'on_track', offtrack: 'off_track', inpit: 'circle_in_pit', retired: 'circle_retired', stopped: 'circle_stopped', out: 'circle_out' };
+    return this.w(`modular.${Object.hasOwn(labels, value) ? labels[value] : 'status_unavailable'}`);
+  }
+  selectDriver(id) { this.selected = this.selected === id ? '' : id; }
   state(row) {
     if (!row.point || row.point.some(value => value < 0 || value > 100)) return this.w('modular.position_outside_the_available_map');
     if (row.stale) return this.w('modular.saved_position_stale');
@@ -263,13 +290,49 @@ class F1TrackMapView extends LitElement {
   }
   render() {
     if (!this.model || !this.settings) return html``;
+    const showMap = this.module.fields.includes('track_map') || this.module.fields.some(field => field.startsWith('map_') && field !== 'map_drivers');
+    if (!showMap && !this.module.fields.includes('map_drivers')) return this.renderPhysical(showMap);
+    const mode = this.viewMode ?? 'physical';
+    return html`<div class="map-view-controls" role="group" aria-label=${this.w('legacy.modular.track_map_view')}>
+      ${['physical', 'circular'].map(value => html`<button type="button" aria-pressed=${String(mode === value)} @click=${() => { this.viewMode = value; }}>${this.w(`modular.map_view_${value}`)}</button>`)}
+    </div>${mode === 'circular' ? html`${showMap ? this.renderCircular() : ''}${this.renderRoster()}` : this.renderPhysical(showMap)}`;
+  }
+  renderCircular() {
+    return html`<section class="map-frame circle-shell" aria-labelledby="circle-heading">
+      <h3 id="circle-heading">${this.w('modular.circle_of_doom')}</h3>
+      <p>${this.w('modular.circle_leader_zero')}</p>
+      <svg viewBox="0 0 100 100" aria-hidden="true">
+        <circle class="track" cx="50" cy="50" r="42"></circle>
+        <rect class="circle-reference" x="49" y="3" width="2" height="10"></rect>
+      </svg>
+      <p role="status">${this.w('modular.circle_timing_unavailable')}</p>
+    </section>`;
+  }
+  renderRoster() {
+    const { roster = [], seeking, mapBlocked, rosterNotice, freshness } = this.model;
+    const notice = seeking ? this.w('modular.circle_roster_seeking') : rosterNotice ?? mapBlocked;
+    return html`<section class="circle-roster" aria-labelledby="circle-roster-heading">
+      <h3 id="circle-roster-heading">${this.w('modular.circle_driver_roster')}</h3>
+      ${notice ? html`<p>${notice}</p>` : ''}
+      ${roster.length ? html`<ul class="driver-list">${repeat(roster, row => row.id, row => html`<li>
+        <button type="button" style=${`--team-accent:${this.accent(row)}`} aria-pressed=${String(this.selected === row.id)} @click=${() => this.selectDriver(row.id)}>
+          <span>${row.id} · ${this.settings.appearance.full_names || row.driver === row.id ? row.name : row.driver}<small>${row.team ?? ''}</small></span>
+          <span>${this.driverStatus(row)}
+            ${row.stale || freshness?.stale || notice ? html`<small>${this.w('modular.circle_driver_data_stale')}</small>` : ''}
+            <small>${this.w('modular.circle_placement_unavailable')}</small>
+          </span>
+        </button>
+      </li>`)}</ul>` : html`<p>${this.w('modular.circle_no_drivers')}</p>`}
+    </section>`;
+  }
+  renderPhysical(showMap) {
+    if (this.model.mapBlocked) return html`<p class="empty">${this.model.mapBlocked}</p>`;
     const rows = this.model.rows ?? [], font = Math.max(2.2, 1400 / this.width);
     const annotations = this.model.annotations ?? { lines: [], corners: [], points: [], unavailable: [] };
     const featurePoints = annotations.points ?? [];
     const labels = this.markingLabels(annotations, featurePoints, font);
     const markingCount = annotations.lines.length + annotations.corners.length + featurePoints.length;
     const annotationsSelected = this.module.fields.some(field => ['map_start_finish', 'map_corners', 'map_sectors', 'map_speed_traps', 'map_detection_zones'].includes(field));
-    const showMap = this.module.fields.includes('track_map') || this.module.fields.some(field => field.startsWith('map_') && field !== 'map_drivers');
     const showList = this.module.fields.includes('map_drivers');
     const options = this.module.options, showLabels = options.labels !== 'off';
     const status = this.statusInfo(), session = [this.model.context?.meeting, this.model.context?.session].filter(Boolean).join(' · ');
@@ -315,7 +378,7 @@ class F1TrackMapView extends LitElement {
       ${markingCount ? html`<div class="annotation-summary"><details><summary>${this.w('modular.track_markings')} · ${markingCount}</summary><ul>${annotations.lines.map(line => html`<li>${line.layer === 'sectors' ? `${this.annotationName('map_sectors')} ${line.label}/${this.sectorStart(line)}` : this.annotationName('map_start_finish')}</li>`)}${annotations.corners.map(corner => html`<li>${this.w('modular.corner')} ${corner.label}</li>`)}${featurePoints.map(point => html`<li>${this.featureDescription(point)}</li>`)}</ul></details></div>` : ''}
       ${annotations.unavailable.length ? html`<p class="annotation-unavailable">${annotations.unavailable.map(field => this.annotationName(field)).join(', ')}: ${this.w('modular.no_verified_markings_for_this_session')}</p>` : ''}
       ${showList || showMap ? html`<details class="map-list" .open=${this.listOpen} @toggle=${event => { this.listOpen = event.target.open; }}><summary>${this.w('modular.driver_positions_and_status')}${this.module.options.show_driver_count === false ? '' : ` · ${rows.length}`}</summary>
-        ${rows.length ? html`<ul class="driver-list">${repeat(rows, row => row.id, row => html`<li><button aria-pressed=${String(this.selected === row.id)} @click=${() => { this.selected = this.selected === row.id ? '' : row.id; }}><span>${row.id} · ${this.settings.appearance.full_names ? row.name : row.driver}<small>${row.team ?? ''}</small></span><span><span>${this.state(row)}</span><small>${dateTime(row.timestamp, this.settings, { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</small></span></button></li>`)}</ul>` : html`<p class="empty">${this.w('modular.no_driver_positions_are_available_live_positioning_needs_f1tv_access_and_a_supported_session')}</p>`}
+        ${rows.length ? html`<ul class="driver-list">${repeat(rows, row => row.id, row => html`<li><button aria-pressed=${String(this.selected === row.id)} @click=${() => this.selectDriver(row.id)}><span>${row.id} · ${this.settings.appearance.full_names ? row.name : row.driver}<small>${row.team ?? ''}</small></span><span><span>${this.state(row)}</span><small>${dateTime(row.timestamp, this.settings, { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</small></span></button></li>`)}</ul>` : html`<p class="empty">${this.w('modular.no_driver_positions_are_available_live_positioning_needs_f1tv_access_and_a_supported_session')}</p>`}
       </details>` : ''}
       ${options.show_footer ? html`<div class="map-footer"><span>${source}</span><span>${this.model.context?.updated ? dateTime(this.model.context.updated, this.settings, { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : this.w('modular.update_time_unavailable')}</span></div>` : ''}
     </div>`;
