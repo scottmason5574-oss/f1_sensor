@@ -217,3 +217,25 @@ test('session changes without a geometry decision require a full snapshot instea
   assert.equal(state.accept(delta(2, 1, { patch: { session: { session_key: 102 }, track: null } })), 'updated');
   assert.equal(state.snapshot.track, null); assert.deepEqual(state.snapshot.drivers, []);
 });
+
+test('map roster keeps identity without coordinates and retains supported inactive status', () => {
+  const module = { fields: ['track_map'], options: { orientation: 'source', vertical: 'normal' } };
+  const snapshot = {
+    source: 'replay',
+    drivers: [
+      { racing_number: '16', tla: 'LEC', status: 'OnTrack', x: 5, y: 5 },
+      { racing_number: '4', tla: 'NOR', team_name: 'McLaren', team_color: 'ff8000', status: 'OffTrack', stale: true },
+    ],
+    track: { points: [[0, 0], [10, 10]] },
+  };
+  const inactive = [{ racing_number: '16', retired: true }];
+  const model = mapModel(snapshot, module, {}, 0, inactive);
+  assert.deepEqual(model.rows.map(row => row.id), ['4']);
+  assert.deepEqual(model.roster.map(({ id, driver, team, team_color, status, point, stale }) => (
+    { id, driver, team, team_color, status, point, stale }
+  )), [
+    { id: '4', driver: 'NOR', team: 'McLaren', team_color: 'ff8000', status: 'OffTrack', point: null, stale: true },
+    { id: '16', driver: 'LEC', team: null, team_color: null, status: 'retired', point: null, stale: false },
+  ]);
+  assert.deepEqual(mapModel({ ...snapshot, replay_state: 'seeking' }, module).roster, []);
+});

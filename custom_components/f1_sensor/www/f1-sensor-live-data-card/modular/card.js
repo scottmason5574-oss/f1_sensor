@@ -669,12 +669,12 @@ export class F1SensorCard extends LitElement {
         model.lap = laps.status === 'available' && Number.isInteger(currentLap) && currentLap >= 0 ? currentLap : null;
         model.totalLaps = Number.isInteger(totalLaps) && totalLaps > 0 ? totalLaps : null;
         model.trackStatus = trackStatus.status === 'available' ? trackStatus.state : null;
-        if (model.pending) model.blocked = this.mapState.status === 'error' ? this.w('modular.map_data_is_unavailable_check_the_selected_f1_sensor_installation') : this.w('modular.waiting_for_map_data');
+        if (model.pending) model.mapBlocked = this.mapState.status === 'error' ? this.w('modular.map_data_is_unavailable_check_the_selected_f1_sensor_installation') : this.w('modular.waiting_for_map_data');
         if (!this.modelPreview && ['error', 'disconnected', 'refreshing'].includes(this.mapState.status) && !model.pending) {
           if (module.unavailable === 'retain') { model.freshness.stale = true; model.rows = model.rows.map(row => ({ ...row, stale: true })); }
-          else model.blocked = this.w('modular.map_connection_interrupted_your_settings_are_kept');
+          else model.mapBlocked = this.w('modular.map_connection_interrupted_your_settings_are_kept');
         }
-        if (model.blocked && module.unavailable === 'hide' && !this.modelPreview) model.hidden = true;
+        if (model.mapBlocked && module.unavailable === 'hide' && !this.modelPreview) model.hidden = true;
       }
       if (definition?.stream === 'analysis') {
         const adapter = module.type === 'strategy' ? analysisData.strategyModel : module.type === 'battles' ? analysisData.battlesModel : analysisData.timelineModel;
@@ -828,8 +828,15 @@ export class F1SensorCard extends LitElement {
       // A connected HA socket does not prove upstream freshness. An explicitly
       // disconnected socket does prove that live updates cannot reach this card.
       if (!this.modelPreview && this.sourceHass.connection?.connected === false && !['archive', 'replay', 'telemetry'].includes(module.type)) {
-        if (module.unavailable !== 'retain') model.blocked = this.w('modular.home_assistant_is_disconnected_data_returns_after_reconnection_your_settings_are_kept');
-        if (module.unavailable === 'hide') model.hidden = true;
+        const message = this.w('modular.home_assistant_is_disconnected_data_returns_after_reconnection_your_settings_are_kept');
+        if (module.type === 'map') {
+          model.rosterNotice = message;
+          if (module.unavailable !== 'retain') model.mapBlocked = message;
+          if (module.unavailable === 'hide') model.hidden = true;
+        } else {
+          if (module.unavailable !== 'retain') model.blocked = message;
+          if (module.unavailable === 'hide') model.hidden = true;
+        }
       }
       models.set(module.id, model);
     }
