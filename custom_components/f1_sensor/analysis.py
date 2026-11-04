@@ -666,6 +666,7 @@ class Phase4AnalysisStore:
         self._circle_last_lap_time: str | None = None
         self._circle_pit_count: int | None = None
         self._circle_anchor: float | None = None
+        self._circle_awaiting_duration = False
         self._circle_as_of: float | None = None
         self._circle_released: float | None = None
         self._circle_durations: deque[tuple[int, float]] = deque(maxlen=5)
@@ -1115,6 +1116,7 @@ class Phase4AnalysisStore:
         self._circle_last_lap_time = None
         self._circle_pit_count = None
         self._circle_anchor = None
+        self._circle_awaiting_duration = False
         self._circle_as_of = None
         self._circle_released = None
         self._circle_durations.clear()
@@ -1212,11 +1214,26 @@ class Phase4AnalysisStore:
             self._circle_as_of = stamp
             self._circle_released = time()
 
-        raw = _value_text(row.get("LastLapTime"))
-        revised_time = "LastLapTime" in row and raw != self._circle_last_lap_time
+        patch = row.get("LastLapTime")
+        has_lap_time = "LastLapTime" in row and (
+            not isinstance(patch, Mapping) or "Value" in patch
+        )
+        raw = _value_text(patch)
+        revised_time = has_lap_time and raw != self._circle_last_lap_time
         if "NumberOfLaps" not in row:
-            # A separate revision has no independently established lap binding.
-            if revised_time and self._circle_anchor is not None:
+            # Replay can deliver the duration just after the lap counter.
+            # Keep the crossing timestamp from the counter and bind only a
+            # nearby, ordered value in the same uninterrupted leader epoch.
+            if (
+                self._circle_awaiting_duration
+                and self._circle_anchor is not None
+                and 0 < stamp - self._circle_anchor <= 1
+                and not equal_time
+                and has_lap_time
+            ):
+                self._circle_awaiting_duration = False
+                self._record_circle_duration(self._circle_lap, raw)
+            elif revised_time and self._circle_anchor is not None:
                 self._reset_circle()
             return
         lap = _as_int(row["NumberOfLaps"])
@@ -1248,10 +1265,15 @@ class Phase4AnalysisStore:
             self._reset_circle()
             return
         self._circle_anchor = stamp
+        self._circle_awaiting_duration = provider == "replay" and not has_lap_time
+        self._record_circle_duration(lap, raw)
+
+    def _record_circle_duration(self, lap: int | None, raw: str | None) -> None:
         self._circle_last_lap_time = raw
         duration = _as_float(raw)
         if (
-            raw
+            lap is not None
+            and raw
             and re.fullmatch(r"(?:[0-9]+:[0-5][0-9]|[0-9]+)(?:\.[0-9]+)?", raw)
             and duration is not None
             and math.isfinite(duration)

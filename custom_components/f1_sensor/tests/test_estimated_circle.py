@@ -170,3 +170,76 @@ async def test_retrograde_circle_frames_cannot_reseed_crossing():
     finally:
         await analysis.async_close()
         await laps.async_close()
+
+
+@pytest.mark.parametrize(
+    "interruption",
+    [
+        None,
+        "late",
+        "duplicate",
+        "retrograde",
+        "track",
+        "generation",
+        "checkpoint",
+        "leader",
+    ],
+)
+async def test_replay_circle_sparse_lap_time_updates(interruption):
+    bus = _Bus()
+    bus.timing_generation = 0
+    laps = LapAnalysisStore(bus, source_provider=lambda: "replay")
+    analysis = Phase4AnalysisStore(bus, laps, source_provider=lambda: "replay")
+
+    def timing(offset, **row):
+        bus.emit("TimingData", ReplayTimingDelta({"Lines": {"33": row}}, offset))
+        return analysis.snapshot()["estimated_circle"] or {}
+
+    try:
+        _start_race(bus)
+        timing(100, Position="1", NumberOfLaps=3)
+        phase = timing(110, NumberOfLaps=4, LastLapTime={"Value": "1:17.237"})
+        assert (phase["anchor"], phase["duration_seconds"]) == (110, 77.237)
+        phase = timing(111.081, LastLapTime={"OverallFastest": False})
+        assert (phase["anchor"], phase["duration_seconds"]) == (110, 77.237)
+
+        phase = timing(120, NumberOfLaps=5)
+        assert phase["anchor"] == 120
+        timing(120.01, LastLapTime={"PersonalFastest": False})
+        offset = 120.028
+        if interruption == "late":
+            offset = 121.01
+        elif interruption == "duplicate":
+            offset = 120.01
+        elif interruption == "retrograde":
+            offset = 120.005
+        elif interruption == "track":
+            bus.emit("TrackStatus", {"Status": "4"})
+            bus.emit("TrackStatus", {"Status": "1"})
+        elif interruption == "generation":
+            bus.timing_generation += 1
+        elif interruption == "checkpoint":
+            bus.emit(
+                "TimingData",
+                ReplayTimingCheckpoint(
+                    {"Lines": {}}, analysis._replay_gaps.checkpoint()
+                ),
+            )
+        elif interruption == "leader":
+            bus.emit(
+                "TimingData",
+                ReplayTimingDelta(
+                    {"Lines": {"33": {"Position": "2"}, "4": {"Position": "1"}}},
+                    120.02,
+                ),
+            )
+        phase = timing(offset, LastLapTime={"Value": "1:17.147"})
+        if interruption is None:
+            assert (phase["anchor"], phase["as_of"]) == (120, offset)
+            assert phase["duration_seconds"] == pytest.approx(77.192)
+        else:
+            assert phase.get("anchor") is None
+            assert phase.get("duration_seconds") is None
+    finally:
+        await analysis.async_close()
+        await laps.async_close()
