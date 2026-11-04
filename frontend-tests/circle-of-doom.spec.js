@@ -44,9 +44,12 @@ test('configured circular mode fits a narrow viewport without timing evidence', 
   const view = page.locator('f1-track-map-view');
   await expect(view.getByRole('button', { name: 'Circular', exact: true })).toHaveAttribute('aria-pressed', 'true');
   await expect(view.getByRole('status')).toHaveText('Verified timing positioning is not yet available.');
-  await expect(view.getByText('Leader zero reference at the top')).toBeVisible();
+  await expect(view.getByText('Start/finish line at 12 o’clock')).toBeVisible();
+  await expect(view.getByText(/leader zero/i)).toHaveCount(0);
+  expect(await page.evaluate(() => matchMedia('(prefers-reduced-motion: reduce)').matches)).toBe(true);
   await expect(view.locator('circle.track')).toBeVisible();
   await expect(view.locator('.circle-reference')).toBeVisible();
+  expect(await finishLineGeometry(view)).toBe(true);
   await expect(view.locator('.marker')).toHaveCount(0);
   const shell = view.getByRole('region', { name: 'Circle of Doom' });
   expect(await shell.evaluate(node => node.scrollWidth <= node.clientWidth)).toBe(true);
@@ -55,6 +58,57 @@ test('configured circular mode fits a narrow viewport without timing evidence', 
   const mode = view.getByRole('button', { name: 'Circular', exact: true });
   await expect(mode).toHaveCSS('border-block-end-width', '3px');
   expect((await mode.boundingBox()).height).toBeGreaterThanOrEqual(44);
+});
+
+async function finishLineGeometry(view) {
+  return view.locator('.circle-reference').evaluate(tick => {
+    const ring = tick.ownerSVGElement.querySelector('circle.track');
+    const { x, y, width, height } = tick.getBBox();
+    const top = ring.cy.baseVal.value - ring.r.baseVal.value;
+    const halfStroke = Number.parseFloat(getComputedStyle(ring).strokeWidth) / 2;
+    return height > width && x + width / 2 === ring.cx.baseVal.value &&
+      y < top - halfStroke && y + height > top + halfStroke;
+  });
+}
+
+test('timing-shaped snapshots leave the finish line fixed and placement unavailable', async ({ page }) => {
+  await mount(page, { view_mode: 'circular' });
+  const view = page.locator('f1-track-map-view');
+  const tick = view.locator('.circle-reference');
+  await expect(tick).toBeVisible();
+  const tickCoordinates = () => tick.evaluate(node => {
+    const { x, y, width, height } = node.getBBox();
+    return { x, y, width, height };
+  });
+  const original = await tickCoordinates();
+  const roster = view.getByRole('region', { name: 'Driver roster' });
+  for (const context of [
+    { source: 'live' },
+    { source: 'replay', replay_state: 'seeking' },
+    { source: 'replay', replay_state: 'paused' },
+  ]) {
+    await page.evaluate(context => {
+      const preview = window.fixtureDemo.preview;
+      window.fixtureCard.previewData = { ...preview, map: {
+        ...preview.map, ...context,
+        session: { session_key: context.source },
+        reference_lap: { duration_seconds: 90, eligible: true },
+        drivers: preview.map.drivers.map(row => ({
+          ...row, tla: context.source.toUpperCase(), gap_seconds: 9, crossing_elapsed_seconds: 45, angle: 144,
+        })),
+      } };
+    }, context);
+    if (context.replay_state === 'seeking') {
+      await expect(roster).toContainText('temporarily unavailable while replay seeks');
+    } else {
+      await expect(roster.getByRole('button', { name: new RegExp(context.source, 'i') }).first()).toBeVisible();
+    }
+    await expect(view.getByRole('status')).toHaveText('Verified timing positioning is not yet available.');
+    await expect(view.locator('svg circle')).toHaveCount(1);
+    await expect(view.locator('.marker')).toHaveCount(0);
+    expect(await finishLineGeometry(view)).toBe(true);
+    expect(await tickCoordinates()).toEqual(original);
+  }
 });
 
 test('circular roster shares driver selection with physical and clears it on session change and seek', async ({ page }) => {

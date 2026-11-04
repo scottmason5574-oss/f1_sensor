@@ -300,7 +300,7 @@ class F1TrackMapView extends LitElement {
   renderCircular() {
     return html`<section class="map-frame circle-shell" aria-labelledby="circle-heading">
       <h3 id="circle-heading">${this.w('modular.circle_of_doom')}</h3>
-      <p>${this.w('modular.circle_leader_zero')}</p>
+      <p>${this.w('modular.circle_start_finish')}</p>
       <svg viewBox="0 0 100 100" aria-hidden="true">
         <circle class="track" cx="50" cy="50" r="42"></circle>
         <rect class="circle-reference" x="49" y="3" width="2" height="10"></rect>
