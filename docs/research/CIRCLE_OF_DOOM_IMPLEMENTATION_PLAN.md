@@ -33,6 +33,16 @@ For initial rejoin, model loss as displacement backward in race-time coordinates
 - Unit-test median eligibility, provisional state, sign, wrap, lap deficit and missing values. Extend modular browser tests for default physical configuration, toggling, focus, full grid at narrow width, reduced motion and seeking.
 - Compare timing tower and circle manually at known replay instants and exercise a touch dashboard. Finish when physical behavior is preserved and both live and replay adapters satisfy the same model contract. Main risks are stale positions, overlap and motion across discontinuities.
 
+### M2-2B-1 owner-approved estimated positioning
+
+Set the Track Map module's `options.circular_positioning` to `estimated` to opt in. The default is `unavailable`. The estimate uses the existing entry-scoped analysis subscription alongside Track Map. Existing spoiler and connection lifecycle rules apply.
+
+An ordered, timestamped one-lap increment for the same observed leader anchors zero degrees at the radial finish line. Use a sparse `LastLapTime` value carried with that driver increment as a provisional duration sample. Use the median of up to five such samples in the same leader epoch. A race-wide lap update, merged bootstrap and replay seek checkpoint supply no crossing anchor. Known pit involvement, a non-green track, a correction or a discontinuity invalidate the affected evidence. Missing or ambiguous evidence leaves placement unavailable.
+
+Live and Live Delay advance from the released timing frame for at most five seconds. This keeps the configured delay in effect. Replay uses the delivered archive timing offset, bounded by the playback position. The display steps with those frames and does not extrapolate between them. After a seek it waits for fresh ordered driver transitions. Fresh, numeric gaps to the same leader set the followers' clockwise offsets. Lapped tokens, intervals to the car ahead and transient lap-counter differences supply no gap estimate.
+
+The earlier certification requirements apply to any future verified positioning claim. This mode displays **Estimated** and uses approximate, timing-derived positions. Synthetic tests exercise subscription, timing and rendering behavior without establishing authentic feed semantics.
+
 ## Phase 3 — Straight-line pit window
 
 - Requires the Phase 2 selection and frame plus approved fallback provenance. Add the prediction module and linear renderer with selected driver, loss range, projected slot, neighboring cars and gap labels.

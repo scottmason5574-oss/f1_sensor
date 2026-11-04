@@ -1,6 +1,7 @@
 const version = new URL(import.meta.url).searchParams.get('v');
 const load = path => import(`${path}${version ? `?v=${encodeURIComponent(version)}` : ''}`);
 const [{ LitElement, html, svg, css, repeat }, { sharedStyles, words, dateTime }, { displayTrack }] = await Promise.all([load('../f1-lit-3.3.2.js'), load('./view.js'), load('./map-geometry.js')]);
+const { circlePoint } = await load('./circle-data.js');
 class F1TrackMapView extends LitElement {
   static properties = { model: { attribute: false }, module: { attribute: false }, settings: { attribute: false }, width: { state: true }, selected: { state: true }, listOpen: { state: true }, viewMode: { state: true } };
   static styles = [sharedStyles, css`
@@ -11,6 +12,9 @@ class F1TrackMapView extends LitElement {
     .circle-shell { display:grid; gap:8px; min-width:0; padding:12px; text-align:center; }
     .circle-shell h3,.circle-shell p { margin:0; }
     .circle-shell svg { max-width:320px; margin-inline:auto; }
+    .circle-marker[hidden] { display:none; }
+    .circle-marker text { font-size:3.6px; text-anchor:middle; }
+    .circle-marker.selected { filter:drop-shadow(0 0 1px var(--f1-focus)); }
     .circle-reference { fill:var(--f1-text); }
     @media(forced-colors:active) { .circle-reference { fill:CanvasText; } }
     .map-shell.compact { gap:8px; }
@@ -69,6 +73,7 @@ class F1TrackMapView extends LitElement {
     super.disconnectedCallback(); this.observer?.disconnect();
     if (this.motionFrame) cancelAnimationFrame(this.motionFrame);
     this.motionFrame = 0;
+    this.stopCircleMotion();
   }
   willUpdate(changed) {
     const sessionChanged = this.model?.sessionKey !== this.sessionKey;
@@ -89,6 +94,51 @@ class F1TrackMapView extends LitElement {
     }
     const rows = this.viewMode === 'circular' ? this.model?.roster : this.model?.rows;
     if (this.selected && (this.model?.seeking || !rows?.some(row => row.id === this.selected))) this.selected = '';
+  }
+  updated(changed) {
+    if (changed.has('model') || changed.has('viewMode') || changed.has('settings')) this.syncCircleMotion();
+  }
+  stopCircleMotion() {
+    cancelAnimationFrame(this.circleFrame);
+    clearTimeout(this.circleExpiry);
+  }
+  circleRows(now = performance.now()) {
+    const circle = this.model?.circle;
+    if (!circle?.rows.length || this.viewMode !== 'circular') return [];
+    const age = this.circleModel === circle ? (now - this.circleStart) / 1000 : 0;
+    if (age >= circle.lifetime) return [];
+    const advance = Number.isFinite(circle.lifetime) && !this.reducedMotion() ? age : 0;
+    const positions = new Map(circle.rows.filter(row => age < row.expires).map(row => [row.id, row.gap]));
+    return (this.model.roster ?? []).filter(row => positions.has(row.id)).map(row => ({
+      ...row, point: circlePoint(circle.elapsed + advance, positions.get(row.id), circle.lap),
+    }));
+  }
+  syncCircleMotion() {
+    this.stopCircleMotion();
+    const circle = this.model?.circle;
+    if (this.circleModel !== circle) {
+      this.circleModel = circle;
+      this.circleStart = performance.now();
+    }
+    if (this.viewMode !== 'circular' || !circle?.rows.length || !Number.isFinite(circle.lifetime)) return;
+    const age = (performance.now() - this.circleStart) / 1000;
+    const nextExpiry = Math.min(circle.lifetime, ...circle.rows.map(row => row.expires).filter(expiry => expiry > age));
+    if (nextExpiry <= age) return;
+    this.circleExpiry = setTimeout(() => {
+      this.requestUpdate();
+      this.syncCircleMotion();
+    }, (nextExpiry - age) * 1000 + 1);
+    if (this.reducedMotion()) return;
+    const animate = now => {
+      const points = new Map(this.circleRows(now).map(row => [row.id, row.point]));
+      for (const marker of this.renderRoot.querySelectorAll('.circle-marker')) {
+        const point = points.get(marker.dataset.driver);
+        marker.toggleAttribute('hidden', !point);
+        if (point) marker.setAttribute('transform', 'translate(' + point.join(' ') + ')');
+      }
+      if (points.size && !this.reducedMotion()) this.circleFrame = requestAnimationFrame(animate);
+    };
+    this.circleFrame = requestAnimationFrame(animate);
   }
   reducedMotion() {
     return this.settings?.accessibility?.motion === 'reduced' || globalThis.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
@@ -298,18 +348,34 @@ class F1TrackMapView extends LitElement {
     </div>${mode === 'circular' ? html`${showMap ? this.renderCircular() : ''}${this.renderRoster()}` : this.renderPhysical(showMap)}`;
   }
   renderCircular() {
+    const circle = this.model.circle;
+    const priority = row => Number(row.id === this.selected || row.selected);
+    const rows = this.circleRows().sort((a, b) => priority(b) - priority(a));
+    const labels = [];
+    const markers = rows.map(row => {
+      const showLabel = !labels.some(point => Math.hypot(point[0] - row.point[0], point[1] - row.point[1]) < 10);
+      if (showLabel) labels.push(row.point);
+      return { ...row, showLabel };
+    }).reverse();
     return html`<section class="map-frame circle-shell" aria-labelledby="circle-heading">
       <h3 id="circle-heading">${this.w('modular.circle_of_doom')}</h3>
       <p>${this.w('modular.circle_start_finish')}</p>
       <svg viewBox="0 0 100 100" aria-hidden="true">
         <circle class="track" cx="50" cy="50" r="42"></circle>
         <rect class="circle-reference" x="49" y="3" width="2" height="10"></rect>
+        ${repeat(markers, row => row.id, row => svg`<g class="marker circle-marker ${priority(row) ? 'selected' : ''}" data-driver=${row.id}
+          style=${'--team-accent:' + this.accent(row)} transform=${'translate(' + row.point.join(' ') + ')'}>
+          <circle r="2"></circle><circle class="team" r="1.4"></circle>
+          ${row.showLabel ? svg`<text y="-3">${row.id}</text>` : ''}
+        </g>`)}
       </svg>
-      <p role="status">${this.w('modular.circle_timing_unavailable')}</p>
+      ${circle ? html`<p>${this.w('modular.circle_estimated_description')}</p>` : ''}
+      ${!rows.length ? html`<p role="status">${this.w(circle ? 'modular.circle_unavailable_' + (circle.reason ?? 'context') : 'modular.circle_timing_unavailable')}</p>` : ''}
     </section>`;
   }
   renderRoster() {
     const { roster = [], seeking, mapBlocked, rosterNotice, freshness } = this.model;
+    const placed = new Set(this.circleRows().map(row => row.id));
     const notice = seeking ? this.w('modular.circle_roster_seeking') : rosterNotice ?? mapBlocked;
     return html`<section class="circle-roster" aria-labelledby="circle-roster-heading">
       <h3 id="circle-roster-heading">${this.w('modular.circle_driver_roster')}</h3>
@@ -319,7 +385,7 @@ class F1TrackMapView extends LitElement {
           <span>${row.id} · ${this.settings.appearance.full_names || row.driver === row.id ? row.name : row.driver}<small>${row.team ?? ''}</small></span>
           <span>${this.driverStatus(row)}
             ${row.stale || freshness?.stale || notice ? html`<small>${this.w('modular.circle_driver_data_stale')}</small>` : ''}
-            <small>${this.w('modular.circle_placement_unavailable')}</small>
+            <small>${this.w(placed.has(row.id) ? 'modular.circle_option_estimated' : 'modular.circle_placement_unavailable')}</small>
           </span>
         </button>
       </li>`)}</ul>` : html`<p>${this.w('modular.circle_no_drivers')}</p>`}

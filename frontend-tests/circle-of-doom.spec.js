@@ -228,3 +228,96 @@ test('physical map clears a local selection when the driver becomes inactive', a
   await setRetired(false);
   await expect(driver).toHaveAttribute('aria-pressed', 'false');
 });
+
+test('estimated markers use one scoped analysis subscription and clear on disconnect and teardown', async ({ page }, testInfo) => {
+  await page.setViewportSize({ width: 320, height: 700 });
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await mount(page, { view_mode: 'circular', circular_positioning: 'estimated' });
+  await page.evaluate(() => {
+    const card = window.fixtureCard, demo = window.fixtureDemo;
+    const asOf = Date.now() / 1000;
+    window.circleRequests = [];
+    window.circleStops = [];
+    const connection = Object.assign(new EventTarget(), {
+      connected: true,
+      subscribeEvents: async () => () => {},
+      subscribeMessage: async (callback, message) => {
+        const snapshot = { ...demo.preview.map, session: { session_key: '41' }, source: 'live' };
+        if (message.type === 'f1_sensor/track_map/subscribe') {
+          callback({ protocol_version: 2, type: 'snapshot', entry_id: 'demo', sequence: 1, geometry_revision: 1, snapshot });
+        }
+        if (message.type === 'f1_sensor/analysis/subscribe') {
+          window.circleRequests.push(message.entry_id);
+          window.emitCircle = () => callback({
+            protocol_version: 1, status: 'ready', provider: 'f1_live', session_id: '41:Race',
+            capabilities: { connection: 'connected' }, race_gap_epoch: 1, race_gap_source_time: asOf,
+            estimated_circle: { session_key: '41', generation: 0, leader: 4, epoch: 1,
+              anchor: asOf - 15, as_of: asOf, released_at: Date.now() / 1000 - 0.01, duration_seconds: 90 },
+            timing: [1, 16].map(driver_number => ({ driver_number, gap_observation: {
+              leader: 4, epoch: 1, event_time: asOf, gap: driver_number === 1 ? '+9.0' : '+9.01',
+            } })),
+            drivers: [{ driver_number: 16, tla: 'LEC', name: 'Charles Leclerc' }],
+          });
+        }
+        return () => window.circleStops.push(message.type);
+      },
+    });
+    const entry = demo.preview.entries[0];
+    window.setCircleSpoilers = state => {
+      const entity = entry.global_entities.no_spoiler_mode;
+      card.hass = { ...card.hass, states: { ...card.hass.states, [entity]: { state, attributes: {} } } };
+    };
+    card.previewData = null;
+    card.hass = { ...demo.hass, connection, callWS: async () => demo.preview.entries };
+  });
+  const view = page.locator('f1-track-map-view');
+  await expect(view.getByRole('status')).toHaveText('Waiting for timing analysis.');
+  await expect.poll(() => page.evaluate(() => window.circleRequests)).toEqual(['demo']);
+  await page.evaluate(() => window.emitCircle());
+  const markers = view.locator('.circle-marker');
+  await expect(markers).toHaveCount(3);
+  await expect(view.getByText('Estimated positions are approximate', { exact: false })).toBeVisible();
+  await expect(markers.locator('text')).toHaveCount(2);
+  const driver = view.getByRole('button', { name: /16 · LEC/ });
+  await driver.focus();
+  await page.keyboard.press('Space');
+  await expect(driver).toHaveAttribute('aria-pressed', 'true');
+  await expect(view.locator('.circle-marker[data-driver="16"]')).toHaveClass(/selected/);
+  const leader = view.locator('.circle-marker[data-driver="4"]');
+  const point = await leader.getAttribute('transform');
+  const renderTurn = () => page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  await renderTurn();
+  expect(await leader.getAttribute('transform')).toBe(point);
+  const screenshot = testInfo.outputPath('estimated-circle-320px.png');
+  await view.locator('.circle-shell').screenshot({ path: screenshot });
+  await testInfo.attach('estimated-circle-320px', { path: screenshot, contentType: 'image/png' });
+  await page.evaluate(() => {
+    const card = window.fixtureCard;
+    card.hass.connection.connected = false;
+    card.hass.connection.dispatchEvent(new Event('disconnected'));
+    card.hass = { ...card.hass };
+  });
+  await expect(markers).toHaveCount(0);
+  await page.evaluate(() => {
+    const card = window.fixtureCard;
+    card.hass.connection.connected = true;
+    card.hass.connection.dispatchEvent(new Event('ready'));
+    card.hass = { ...card.hass };
+  });
+  await expect.poll(() => page.evaluate(() => window.circleRequests)).toEqual(['demo', 'demo']);
+  await expect(markers).toHaveCount(0);
+  await page.evaluate(() => window.emitCircle());
+  await expect(markers).toHaveCount(3);
+  await page.emulateMedia({ reducedMotion: 'no-preference' });
+  await page.evaluate(() => window.emitCircle());
+  const startingPoint = await leader.getAttribute('transform');
+  await expect.poll(() => leader.getAttribute('transform')).not.toBe(startingPoint);
+  await page.evaluate(() => window.setCircleSpoilers('on'));
+  await expect(page.getByText('Spoiler protection is active.', { exact: true })).toBeVisible();
+  await expect(markers).toHaveCount(0);
+  await expect.poll(() => page.evaluate(() => window.circleStops.filter(type => type === 'f1_sensor/analysis/subscribe').length)).toBe(2);
+  await page.evaluate(() => window.setCircleSpoilers('off'));
+  await expect.poll(() => page.evaluate(() => window.circleRequests)).toEqual(['demo', 'demo', 'demo']);
+  await page.evaluate(() => window.fixtureCard.remove());
+  await expect.poll(() => page.evaluate(() => window.circleStops.filter(type => type === 'f1_sensor/analysis/subscribe').length)).toBe(3);
+});

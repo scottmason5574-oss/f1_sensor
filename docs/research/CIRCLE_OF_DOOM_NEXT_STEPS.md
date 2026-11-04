@@ -17,3 +17,12 @@ M1C replay and reference-lap contracts passed synthetic runtime validation. M1D 
 M2-2A-6B-1 stopped at transport eligibility. The installed aiohttp client accepted masked server frames and lacked a no-redirect option on its WebSocket upgrade path. The approved websockets 17.4 release was installed in an isolated research environment. Synthetic byte probes showed that it accepted nonminimal wire-frame length encodings. No live bridge was implemented and no authentic timing data was collected. Future work requires separate approval for a compliant transport or bounded parser approach.
 
 The [implementation plan](./CIRCLE_OF_DOOM_IMPLEMENTATION_PLAN.md) records Phase 2 exit criteria.
+
+### Owner decision for M2-2B-1
+
+Use the existing F1 Sensor timing and Track Map subscriptions for opt-in estimated
+circular positioning. This mode uses provisional driver lap observations and
+shows unavailable placement when its source, crossing, duration or gap evidence
+is insufficient. The finish line stays at 12 o’clock and the leader moves
+clockwise with the other placed drivers. The independent capture work stays
+closed for this assignment. See the [estimated positioning contract](./CIRCLE_OF_DOOM_IMPLEMENTATION_PLAN.md#m2-2b-1-owner-approved-estimated-positioning).

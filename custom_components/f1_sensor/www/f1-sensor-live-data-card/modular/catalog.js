@@ -414,6 +414,7 @@ export const MODULES = {
     show_lap_progress: { type: 'boolean', default: true, label: 'Show lap progress' },
     show_track_status: { type: 'boolean', default: true, label: 'Show track status' },
     view_mode: { type: 'enum', values: ['physical', 'circular'], default: 'physical', label: 'Track map view' },
+    circular_positioning: { type: 'enum', values: ['unavailable', 'estimated'], default: 'unavailable', label: 'Circular positioning' },
     track_status_line_mode: { type: 'enum', values: ['accent', 'full', 'off'], default: 'accent', label: 'Track-status line' },
     show_driver_count: { type: 'boolean', default: true, label: 'Show driver count' },
   }, ['track_map', 'current_session', 'race_lap_count', 'track_status'], { spoiler: true, stream: 'track_map', focus: ['driver', 'team'], defaultFields: ['track_map', 'map_drivers'] }),
