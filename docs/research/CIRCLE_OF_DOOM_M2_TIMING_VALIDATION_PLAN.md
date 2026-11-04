@@ -213,3 +213,187 @@ and measurement time, crossing and lap-counter ordering, explicit token
 lifecycle, leader-change anchoring, sparse clear semantics, correction
 precedence, lap validity and complete eligibility, and live versus archive
 availability and ordering open.
+
+## Synthetic raw SignalR boundary
+
+The offline prototype lives in `research/timing_capture/raw_signalr.py`. A
+trusted, importable source factory can return `RawFrames` to the existing
+supervisor. Pass the factory's absolute cutoff to the adapter and use the
+same transport variant and synthetic subscription ID in the recorder options.
+The adapter holds an immutable run configuration. The recorder compares the
+variant, expected ID and absolute cutoff before opening output or entering
+transport setup. A disagreement records only configuration_mismatch. The
+supervisor may already have reserved empty artifact files at that point.
+The injected fake has synchronous setup, handshake (Core only), subscribe,
+receive and shutdown operations. Each receives the same absolute cutoff.
+Receive supplies a synthetic text frame (UTF-8 bytes or a string), a fixed
+terminal event, or fixture exhaustion. The adapter opens no connections.
+
+| Production boundary in `custom_components/f1_sensor/signalr.py` | Evidence available at the raw receive boundary |
+| --- | --- |
+| Legacy `SignalRLegacyClient.messages` consumes WebSocket TEXT, calls `json.loads`, skips invalid JSON and JSON null, and ends on socket close or error. Negotiation JSON and subscription sends are in `connect`, outside the receive hook. | Take the frame before parsing or filtering. Legacy uses one record per frame, top-level key order for source groups and the original entry order inside M and R. Correlate R against I in memory. Preserve M and R when both occur. A string E matching the production authorization classifier denies the entire envelope before correlation, regardless of I. No later delivery is read. A generic matching invocation error consumes the subscription without producing bootstrap evidence. |
+| Core `SignalRCoreClient.connect` reads the handshake via `receive()`, uses the first surviving decoded object as the handshake, queues the rest, and sends Subscribe. `messages` then handles pending records and reads subsequent WebSocket frames. | Use both receive sites before splitting. Keep the handshake at segment zero, and keep subsequent segments in that frame at their original indices. A completion in that frame predates the synthetic subscription send and cannot establish its bootstrap. |
+| Core `_decode_core_records` skips empty segments and non-object JSON. A JSON error in the normal receive loop discards the entire frame. `_translate_record` wraps type 1 as M and type 3 as R, discarding the completion ID and filtering non-dictionary results. Type 6 sends a ping reply and type 7 ends the stream. | Preserve bad segment slots and correlate type 3 against the expected invocation ID before translation. Record handshake and ping controls in the audit. A close or error ends the synthetic attempt. |
+| `LiveBus._process_payload` filters malformed invocations and null payloads, dispatches M before R, and dispatches SessionInfo first inside R. `_dispatch` normalizes the payload, samples activity time, caches data and invokes subscribers. | Keep arrival and source order separate from the recorder's modeled dispatch coordinates. Neither `messages()` API supplies raw frame coordinates, decoder clocks or per-record decode loss. Application coordinates model relative order within a decoded frame or group. They do not establish actual application dispatch or release time. |
+
+Core dispatch eligibility is atomic per raw delivery. Preflight checks the
+262,144-byte UTF-8 cap before parsing and scans at most 128 record slots.
+It keeps a bounded decoded list and parses one segment at a time under the
+same absolute cutoff. A final nonempty segment is parsed even without a
+separator, as in production. An invalid final segment rejects the delivery.
+Adjacent separators retain their empty-slot diagnostics. Whitespace after
+the last separator does not create another slot.
+
+Preflight checks the decoded structure and the aggregate entry and size
+budgets before applying handshake, completion, close or dispatch state.
+Invalid JSON, duplicate keys, nonstandard constants, decoded-budget failures
+or record overflow make the whole delivery ineligible. The first uninspected
+slot has a core_record_limit diagnostic, retained even if the ordinary
+audit capacity is saturated. The uninspected tail could contain a close or
+completion, so scanner overflow ends the attempt with
+protocol_state_unverifiable. No later delivery is read, and no unseen close
+is reported as confirmed. Core frames rejected before parsing for byte
+size, invalid UTF-8 or unsupported raw type also end the attempt because
+the envelope could not be inspected. A delivery that expires during
+preflight retains the available deadline metadata and releases no rows.
+Earlier eligible deliveries remain intact.
+
+Production uses the default Python JSON decoder. Duplicate object keys
+resolve to the last value, and NaN, Infinity and -Infinity are accepted.
+The research parser rejects those forms and never reparses rejected records
+with permissive settings to look for a terminal condition.
+
+| Core rejection or exclusion | Production decode and possible protocol effect | Continue? | Fixed diagnostic | Correlation and terminal state |
+| --- | --- | --- | --- | --- |
+| Ordinary syntax error, including an invalid final segment | Production discards a normal receive delivery on JSONDecodeError before dispatching any slot. | Yes after handshake, subject to the other stop rules. | invalid_json | Pending becomes unverifiable. A visible close causes a conservative stop. |
+| Duplicate keys or nonstandard constants | Production can decode and act on a close, error or completion. | No | json_policy_rejection | Pending becomes unverifiable. Stop with protocol_state_unverifiable. |
+| Decoder value or recursion limit | The decoder can raise outside the production JSONDecodeError handler. | No | json_decoder_limit | Pending becomes unverifiable. Stop with protocol_state_unverifiable. |
+| Raw byte cap, invalid UTF-8 or unsupported raw type | The adapter cannot inspect the delivery. Production handling depends on the WebSocket boundary. | No | raw_frame_size, invalid_utf8 or raw_frame_type | Pending becomes unverifiable. Stop with protocol_state_unverifiable. |
+| Scanner overflow | Production can decode slots beyond the scanner cap, including a close or completion. | No | core_record_limit at the first uninspected slot | Pending becomes unverifiable. Stop with protocol_state_unverifiable. |
+| Decoded record, aggregate structure or entry budget | Production can decode beyond the research budget and act on a close, error or completion. | No | decoded_record_budget, subscription_completion_budget or decoded_delivery_budget | Pending becomes unverifiable. Stop with protocol_state_unverifiable. |
+| Decode exception, cancellation or deadline | Interrupted preflight establishes no protocol result. | No | connection_error, access_denied, operation_cancelled or operation_deadline with phase and available frame | An interrupted delivered frame makes pending correlation unverifiable. The attempt ends. |
+| Fully decoded unsupported structure | Production skips non-objects and unknown types. It may translate an unsupported feed or reply to a ping with extra keys. Close and matching completion handling precede payload filtering. | Yes for ordinary excluded slots. | decoder_failure, core_record, core_noncanonical_type or the applicable entry diagnostic | Ordinary excluded slots leave state intact. Recognized completion and terminal rules still apply. |
+| Rejected handshake | Production may accept the shape or fail during setup. | No | handshake_rejected or the applicable preflight diagnostic | No subscription is sent. The attempt ends. |
+
+A valid final JSON segment can omit the separator. Syntax-invalid and
+policy-rejected tails follow their respective rules. A policy or budget stop
+identifies uncertainty at the original source slot. It does not assert a
+confirmed close. Terminal detail can replace ordinary diagnostics within the
+fixed audit cap. Previously accepted observations remain available.
+
+A rejected delivery emits only safe, bounded diagnostics at observable
+source coordinates. A recognizable matching completion in that delivery
+cannot establish bootstrap. Because the discarded or uninspected slots
+can hide the first completion, pending correlation becomes unverifiable
+for the rest of the attempt. The audit records that state even if no later
+completion arrives. A later response cannot repair it. A subscription
+already resolved by a clean delivery stays consumed.
+
+A close is confirmed only when its delivery passes the bounded Core decode.
+Both production receive paths compare the decoded type to integer 7.
+Production translation also compares types 1, 3 and 6 by equality. The
+offline classifier accepts equal JSON integer, decimal and exponent
+encodings for all four types. A matching completion uses the same one-use
+invocation state across those encodings, including in early or discarded
+delivery checks.
+
+| Type | Production classification | Offline evidence policy |
+| --- | --- | --- |
+| 1 | Invocation | Only structurally valid feed invocations can supply modeled rows. |
+| 3 | Completion | Correlation precedes bootstrap usability checks. An eligible matching failure or unusable result still consumes the pending invocation. |
+| 6 | Ping | A bare type record is an audit control. The synthetic adapter sends no reply. |
+| 7 | Close | An eligible record ends modeled dispatch at its source slot. |
+
+Python equality makes true compare equal to 1 in production. The research
+adapter intentionally rejects that noncanonical form with
+core_noncanonical_type and grants it no modeled dispatch. False, numeric
+strings, null, objects, arrays and other numbers do not match these four
+production comparisons. Structural allowlists and privacy checks still
+apply after numeric classification.
+If a discarded delivery contains a visible close, the adapter records
+protocol_state_unverifiable at the close slot and stops conservatively. The
+production receive loop discards malformed deliveries and can continue. A
+conservative stop is therefore distinct from a confirmed production close.
+A failed synthetic handshake or clean Core close also ends the attempt.
+Following slots in a clean terminal delivery retain only post_terminal_record
+diagnostics. Subsequent frames are left unread. A
+successful handshake can share a frame with feed records that precede the
+later subscription completion. Those feed records retain their source slots.
+A completion in that handshake frame still predates the subscription send.
+
+Each transport permits one pending subscription completion. The first
+matching terminal response in an eligible delivery consumes it, including
+an error or unusable result. An over-budget completion makes the delivery
+ineligible. A rejected decoded envelope that
+could hide a completion leaves later correlation unverifiable. Missing,
+unsupported, mismatched and duplicate identifiers have separate fixed codes
+with source coordinates. An already consumed invocation cannot yield a second
+trusted bootstrap. A matching response establishes correlation only. It still
+needs a supported non-null stream payload to yield a bootstrap observation.
+LiveBus skips top-level nulls, so the recorder saves only a fixed skip
+diagnostic and source coordinates for them. It retains the match flag where
+applicable and assigns no application coordinate to the skipped slot. Nested
+nulls and explicit null feed timestamps remain evidence. Bootstrap dispatch
+ranks continue to represent sorted source slots, which can have gaps.
+
+Decode and projection loss mark the audit incomplete. Known keepalives, a
+matched handshake and an accepted ping are control observations. Rejected
+payload text, raw frames, IDs and exception messages are excluded from
+diagnostics. Negotiation and connection credentials are outside the fake
+interface. The original privacy projection, 2 MiB output limit, storage
+ownership, recovery and deletion rules apply.
+
+The adapter samples decoder-delivery UTC and monotonic time immediately
+after a fake receive returns within the cutoff, before parsing. All rows from
+that delivery share those values. The recorder samples observation UTC and elapsed monotonic time consecutively
+at the same post-projection boundary, before serialization or writing. The optional
+original feed timestamp retains omission versus explicit null. No
+measurement time, application release time or archive offset is inferred.
+
+The supervisor still owns the 300-second outer limit and its shutdown
+reserve. The adapter checks the absolute worker cutoff around injected
+operations and during Core scanning, and checks after parsing. A callback or
+JSON parser already executing must return for a cooperative check to run.
+Shutdown receives the same cutoff, including after expiry, so a future
+transport must support immediate abort and bounded cleanup at that boundary.
+The existing process escalation covers blocked synthetic workers under the
+documented execution assumptions. The recorder can account for a bounded
+terminal diagnostic after cutoff without projecting or writing a payload.
+It records the known phase (setup, handshake, subscription, receive, decode
+or shutdown) and includes the frame ordinal only if receive returned a frame.
+A deadline without delivery has no frame coordinate. Core exceptions and
+cancellations carry a fixed phase and the frame ordinal if delivery already
+occurred. An interrupted decode releases no rows from that delivery. Earlier
+eligible evidence remains intact. The attempt stops without another receive.
+These diagnostics describe synthetic lifecycle evidence. They do not prove
+actual release timing or establish an authentic connection outcome.
+Ordinary diagnostic saturation cannot evict the primary interruption or a
+separate shutdown deadline or failure. The recorder keeps both by replacing ordinary details
+within the fixed cap and counting the omitted details. This accounting does
+not extend the cutoff. A storage cap or supervisor kill can end the run
+before the diagnostic or final audit is written. Treat any retained prefix
+and missing audit as incomplete.
+
+The fake makes one setup attempt and at most one subscription. It runs no
+background tasks, sends no ping replies and schedules no retry or renewal.
+A separately approved pilot would require a dedicated single-attempt
+boundary. Legacy `connect` starts `_heartbeat`, which renews Subscribe
+after 300 seconds, and both transports' `update_streams` can resubscribe.
+Core responds to ping and terminates on a close record. `LiveBus._run`
+recreates clients after closure or errors and can retry in limited-auth mode.
+Its inactivity monitor can close a transport and trigger that retry path.
+A pilot must bypass the retry loop, inactivity monitor and subscription
+renewal paths, retain only protocol-required operations within the same
+cutoff, and stop on denial or disconnect.
+
+Run the focused suite with
+`python -B -m unittest discover -s research/timing_capture -p test_raw_signalr.py -v`.
+It checks raw coordinates, bootstrap matching, same-frame mixed records,
+clock separation, older arrivals, equal-time revisions, exact and exceeded
+byte limits, diagnostic redaction, denial, cancellation, delayed receive,
+and supervised recovery of an interrupted prefix. These tests establish
+synthetic behavior. Real receive limits, compressed or fragmented delivery,
+authentic envelope shapes, control and correlation behavior, and deadline
+enforcement by the eventual network boundary require independent review and
+separate authorization. The raw cap remains provisional. The M1D gates for
+GapToLeader semantics and whole-lap reference eligibility remain open.

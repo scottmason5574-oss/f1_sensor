@@ -406,6 +406,8 @@ def valid_row(row, sequence):
         return False
     if type(row["projection_complete"]) is not bool or type(row["stream"]) is not str:
         return False
+    if row["payload"] is None:
+        return False
     schema = SCHEMAS.get(row["stream"])
     removed = []
     return schema is not None and project(row["payload"], schema, removed) == row["payload"] and not removed
