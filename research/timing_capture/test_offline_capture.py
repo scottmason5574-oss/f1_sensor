@@ -69,7 +69,7 @@ class OfflineCaptureTests(unittest.TestCase):
             "RaceControlMessages", "PitLaneTimeCollection",
         }
         self.assertEqual(STREAMS, expected)
-        bootstrap = dict.fromkeys(sorted(expected), None)
+        bootstrap = {stream: {} for stream in sorted(expected)}
         audit = self.record([
             {"I": 1, "R": bootstrap},
             {"M": [feed("TimingData", gap(2), STAMP), feed("CarData.z", {})]},
@@ -191,7 +191,7 @@ class OfflineCaptureTests(unittest.TestCase):
                 {"type": 3, "invocationId": "wrong", "result": {"SessionInfo": session}},
                 {"type": 3, "invocationId": identifier,
                  "result": {"TimingData": gap(None), "SessionInfo": session}},
-                {"type": 7, "error": "Bearer synthetic-secret"},
+                {"type": 99, "error": "Bearer synthetic-secret"},
                 None,
                 invocation(gap(3), STAMP),
             ],
@@ -266,7 +266,7 @@ class OfflineCaptureTests(unittest.TestCase):
             yield {"M": [feed("TimingData", gap(2))]}
             self.fail("Consumed input at deadline")
 
-        clock = iter([0, 0, 0, 0, 0, 0, MAX_SECONDS, MAX_SECONDS])
+        clock = iter([0, 0, 0, 0, 0, 0, 0, 0, MAX_SECONDS, MAX_SECONDS])
         audit = self.record(batches(), monotonic=clock.__next__)
         self.assertEqual(audit["stop_reason"], "time_limit")
         self.assertEqual(audit["records_written"], 1)

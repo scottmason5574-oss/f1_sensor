@@ -234,6 +234,7 @@ class FailureTests(unittest.TestCase):
             (feed_row, "subscription_matched", True),
             (feed_row, "elapsed_seconds", -1),
             (feed_row, "payload", gap(True)),
+            (feed_row, "payload", None),
             (core_row, "subscription_matched", None),
             (core_row, "published_timestamp", None),
             (core_row, "source_group", 1),
@@ -241,7 +242,7 @@ class FailureTests(unittest.TestCase):
         ):
             with self.subTest(kind=original["kind"], field=field):
                 mutated = dict(original)
-                if value is None and field != "published_timestamp":
+                if value is None and field not in ("published_timestamp", "payload"):
                     del mutated[field]
                 else:
                     mutated[field] = value
