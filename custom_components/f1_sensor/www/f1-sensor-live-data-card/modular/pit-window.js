@@ -1,4 +1,4 @@
-// Phase 3.1: validation only. No feed subscriptions, prediction or view state.
+// Pure validation and hypothetical displacement. No runtime consumer or view state.
 // Intentionally empty until circuit/scenario loss evidence has been reviewed.
 export const PIT_LOSS_FALLBACKS = Object.freeze([]);
 
@@ -114,4 +114,39 @@ export function normalizePitWindow(frame, { expectedContext, selectedDriver, max
     sessionType: frame.sessionType, maxAge, maxSkew, driverCount: frame.driverCount, drivers: rows,
     trackCode: frame.track.code, sessionState: frame.session.state,
   } };
+}
+
+/**
+ * Hypothetical displacement relative to the no-stop counterfactual at one
+ * explicit horizon. Caller records are not registered production fallbacks.
+ * No pace forecast, lap conversion, traffic ranking or runtime consumer.
+ */
+export function predictPitDisplacement(frame, options = {}, loss) {
+  const normalized = normalizePitWindow(frame, options ?? {}, loss ? [loss] : []);
+  const result = { ...structuredClone(normalized), hypothetical: true,
+    asOf: normalized.comparisonTime, comparisonTime: null, horizon: null,
+    predictionAvailable: false, predictionReason: normalized.reason,
+    projectedDisplacementSeconds: null, rejoinSlot: null, nearbyTraffic: null };
+  const refuse = reason => ({ ...result, predictionReason: reason, reason });
+  if (!loss) return refuse('missing_pit_loss');
+  if (!normalized.inputsAvailable) return result;
+  const reason = observationReason(loss, frame, options.maxAge);
+  if (reason) return refuse(reason);
+  const horizon = options.horizon, measured = loss.measurementHorizon;
+  const validHorizon = value => object(value) &&
+    ['pit_exit', 'in_out_window'].includes(value.kind) && text(value.boundaryId) &&
+    positive(value.secondsFromAsOf);
+  if (!validHorizon(horizon) || !validHorizon(measured)) return refuse('invalid_measurement_horizon');
+  if (horizon.kind !== measured.kind || horizon.boundaryId !== measured.boundaryId ||
+      horizon.secondsFromAsOf !== measured.secondsFromAsOf) return refuse('incompatible_measurement_horizon');
+  const comparisonTime = frame.asOf + horizon.secondsFromAsOf;
+  if (!Number.isFinite(comparisonTime) || comparisonTime <= frame.asOf ||
+      loss.maxSeconds > horizon.secondsFromAsOf) return refuse('invalid_comparison_horizon');
+  return { ...result, predictionAvailable: true, predictionReason: null, reason: null,
+    comparisonTime, horizon: { kind: horizon.kind, boundaryId: horizon.boundaryId,
+      secondsFromAsOf: horizon.secondsFromAsOf },
+    lossObservation: { context: copyContext(loss.context), eventTime: loss.eventTime,
+      availableAt: loss.availableAt },
+    // Negation reverses the interval endpoints. Never average away the range.
+    projectedDisplacementSeconds: { min: -loss.maxSeconds, max: -loss.minSeconds } };
 }
