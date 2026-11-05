@@ -59,6 +59,8 @@ jobs:
       target_branch: ${{ needs.source.outputs.target_branch }}
   context7:
     needs: [source, deploy]
+    # External indexing is advisory after verified Pages publication.
+    continue-on-error: true
     if: >-
       !cancelled() && needs.deploy.result == 'success' && needs.deploy.outputs.published == 'true' &&
       needs.source.outputs.target_branch == 'main'
@@ -85,7 +87,7 @@ jobs:
               sleep 30
               continue
             fi
-            echo "Request failed ($http_code): $body"
+            echo "::warning::Context7 re-index failed (HTTP $http_code); verified Pages publication remains successful."
             exit 1
           done
           echo "Context7 is already processing an indexing job; no new refresh is needed."
