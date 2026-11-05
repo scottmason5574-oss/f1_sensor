@@ -96,6 +96,9 @@ test('replay circle follows the clock and recovers after dashboard navigation an
   await expect(leader).toHaveCount(0);
   await emit({ state: 'playing', asOf: 60, playback: 66, anchor: 50, generation: 2, epoch: 2 });
   await expect(leader).toHaveCount(0);
+  await emit({ state: 'playing', asOf: 66, anchor: null, generation: 2, epoch: 2 });
+  await expect(view.getByRole('status')).toHaveText('Waiting for an observed leader lap completion.');
+  await expect(leader).toHaveCount(0);
   await emit({ state: 'playing', asOf: 67, anchor: 50, generation: 2, epoch: 2 });
   await expect(leader).toBeVisible();
   await expect(follower).toBeVisible();

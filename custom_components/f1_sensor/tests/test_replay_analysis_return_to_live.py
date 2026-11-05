@@ -5,7 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from unittest.mock import AsyncMock
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
 from homeassistant.config_entries import ConfigEntryState
 import pytest
@@ -13,6 +14,7 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components import f1_sensor as f1
 from custom_components.f1_sensor.analysis import Phase4AnalysisStore
+from custom_components.f1_sensor.analysis_websocket import _AnalysisBroadcastHub
 from custom_components.f1_sensor.const import DOMAIN, SUPPORTED_SENSOR_KEYS
 from custom_components.f1_sensor.history import LapAnalysisStore
 from custom_components.f1_sensor.live_window import LiveAvailabilityTracker
@@ -23,6 +25,101 @@ from custom_components.f1_sensor.replay_mode import (
 )
 from custom_components.f1_sensor.signalr import LiveBus
 from custom_components.f1_sensor.tests.test_phase_4_analysis import _timing_pair
+
+
+async def test_dashboard_unsubscribe_preserves_replay_crossing(hass, tmp_path):
+    availability = LiveAvailabilityTracker()
+    bus = LiveBus(hass, AsyncMock(), requested_streams=set())
+    controller = ReplayController(
+        hass, "entry", AsyncMock(), bus, live_state=availability
+    )
+    delayed = f1._DelayedAnalysisBus(hass, bus, 0, None, availability)
+
+    def provider():
+        return "replay" if controller._replay_active else "f1_live"
+
+    laps = LapAnalysisStore(delayed, source_provider=provider)
+    analysis = Phase4AnalysisStore(delayed, laps, source_provider=provider)
+    hass.data.setdefault(DOMAIN, {})["entry"] = {
+        "replay_reset_callbacks": f1._build_replay_reset_callbacks(
+            bus, delayed, laps, analysis
+        ),
+    }
+    runtime = SimpleNamespace(
+        live=SimpleNamespace(bus=bus, availability=availability),
+        replay=SimpleNamespace(controller=controller),
+        capabilities=SimpleNamespace(
+            requested_streams=frozenset(),
+            active_streams=frozenset(),
+            stream_reasons={},
+        ),
+        get={}.get,
+    )
+
+    frames = [
+        (30, "TimingData", {"Lines": {"4": {"Position": "1", "NumberOfLaps": 3}}}),
+        (
+            60,
+            "TimingData",
+            {"Lines": {"4": {"NumberOfLaps": 4, "LastLapTime": {"Value": "90"}}}},
+        ),
+        (250, "TimingData", {"Lines": {"1": {"Position": "2", "GapToLeader": "+9"}}}),
+        (10_000, "Heartbeat", {"Utc": "2026-09-04T14:00:00Z"}),
+    ]
+    frames_file = tmp_path / "navigation.jsonl"
+    frames_file.write_text(
+        "".join(json.dumps({"t": t, "s": s, "p": p}) + "\n" for t, s, p in frames)
+    )
+    controller.session_manager._loaded_index = ReplayIndex(
+        session_id="race",
+        total_frames=len(frames),
+        duration_ms=10_000,
+        session_started_at_ms=0,
+        frames_file=frames_file,
+        index_file=tmp_path / "index.json",
+        initial_state={
+            "SessionInfo": {"Key": "41", "Type": "Race", "Name": "Race"},
+            "SessionStatus": {"Status": "Started"},
+            "TrackStatus": {"Status": "1"},
+        },
+    )
+    controller.session_manager._state = ReplayState.READY
+
+    def subscribe():
+        hub = _AnalysisBroadcastHub(hass, runtime, analysis)
+        hub.payload = analysis.snapshot
+        return hub.add(Mock()), hub
+
+    try:
+        await controller.async_play()
+        unsubscribe, hub = subscribe()
+        async with asyncio.timeout(2):
+            while not (analysis.snapshot()["estimated_circle"] or {}).get("anchor"):
+                await asyncio.sleep(0.01)
+        before = analysis.snapshot()["estimated_circle"]
+        unsubscribe()
+        await asyncio.gather(*hub._demand_tasks)
+        # Allow the next timing frame and the replay-end monitor to run while
+        # there are no dashboard subscribers.
+        await asyncio.sleep(0.35)
+
+        unsubscribe, hub = subscribe()
+        try:
+            after = hub.payload()["estimated_circle"]
+            assert after is not None, controller.state
+            assert (after["anchor"], after["generation"]) == (
+                before["anchor"],
+                before["generation"],
+            )
+            assert after["as_of"] > before["as_of"]
+            assert controller.state is ReplayState.PLAYING
+        finally:
+            unsubscribe()
+    finally:
+        await controller.async_close()
+        await analysis.async_close()
+        await laps.async_close()
+        await delayed.async_close()
 
 
 @pytest.mark.asyncio
