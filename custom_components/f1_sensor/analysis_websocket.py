@@ -403,11 +403,12 @@ class _AnalysisBroadcastHub:
                 self._runtime.capabilities.requested_streams
             ):
                 return
-            should_run = bool(getattr(live.availability, "is_live", False))
-            if requested and should_run:
-                await bus.start()
-            elif not requested:
-                await bus.async_close()
+            # Replay owns the transport even when the last dashboard leaves.
+            if not getattr(live.availability, "replay_locked", False):
+                if requested and getattr(live.availability, "is_live", False):
+                    await bus.start()
+                elif not requested:
+                    await bus.async_close()
             self._runtime.capabilities.active_streams = bus.active_streams
             legacy = self._runtime.get("signalr_stream_capabilities")
             if isinstance(legacy, dict):

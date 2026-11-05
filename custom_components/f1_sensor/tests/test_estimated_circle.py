@@ -124,6 +124,31 @@ async def test_replay_needs_new_ordered_transition_after_checkpoint():
         await laps.async_close()
 
 
+async def test_replay_circle_recovers_after_timing_discontinuity():
+    bus = _Bus()
+    bus.timing_generation = 0
+    laps = LapAnalysisStore(bus, source_provider=lambda: "replay")
+    analysis = Phase4AnalysisStore(bus, laps, source_provider=lambda: "replay")
+
+    def timing(offset, **row):
+        bus.emit("TimingData", ReplayTimingDelta({"Lines": {"4": row}}, offset))
+        return analysis.snapshot()["estimated_circle"]
+
+    try:
+        _start_race(bus)
+        timing(100, Position="1", NumberOfLaps=3)
+        assert timing(110, NumberOfLaps=4, LastLapTime={"Value": "90"})["anchor"] == 110
+        after_gap = timing(128, NumberOfLaps=5)
+        assert after_gap["anchor"] is None
+        assert after_gap["duration_seconds"] is None
+        assert timing(128.02, LastLapTime={"Value": "91"})["anchor"] is None
+        recovered = timing(140, NumberOfLaps=6, LastLapTime={"Value": "92"})
+        assert (recovered["anchor"], recovered["duration_seconds"]) == (140, 92)
+    finally:
+        await analysis.async_close()
+        await laps.async_close()
+
+
 async def test_retrograde_circle_frames_cannot_reseed_crossing():
     bus = _Bus()
     bus.timing_generation = 0

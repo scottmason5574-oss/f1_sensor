@@ -1,11 +1,14 @@
 const { test, expect } = require('@playwright/test');
 
-test('replay circle follows the playback clock and expires unsupported positions', async ({ page }) => {
+test('replay circle follows the clock and recovers after dashboard navigation and timing interruptions', async ({ page }) => {
   await page.emulateMedia({ reducedMotion: 'no-preference' });
   await page.clock.install();
   await mount(page, { view_mode: 'circular', circular_positioning: 'estimated' });
   await page.evaluate(() => {
     const card = window.fixtureCard, demo = window.fixtureDemo;
+    const callbacks = [];
+    window.replayAnalysisCallbacks = callbacks;
+    window.replayAnalysisStops = 0;
     const connection = Object.assign(new EventTarget(), {
       connected: true,
       subscribeEvents: async () => () => {},
@@ -15,6 +18,7 @@ test('replay circle follows the playback clock and expires unsupported positions
             snapshot: { ...demo.preview.map, session: { session_key: '41' }, source: 'replay' } });
         }
         if (message.type === 'f1_sensor/analysis/subscribe') {
+          callbacks.push(callback);
           window.emitReplayCircle = ({ state, anchor = 100, asOf = 110, playback = asOf, generation = 1, epoch = 1, gapEpoch = epoch }) => callback({
             protocol_version: 1, status: 'ready', provider: 'replay', session_id: '41:Race',
             replay: { state, clock_position_ms: playback * 1000, clock_rate: state === 'playing' ? 2 : 0, duration_ms: 300000 },
@@ -23,12 +27,21 @@ test('replay circle follows the playback clock and expires unsupported positions
               observations: [{ driver_number: 1, event_time: asOf - 14, gap: '+9' }] },
             timing: [{ driver_number: 4, position: 1 }, { driver_number: 1, position: 2 }],
           });
+          return () => window.replayAnalysisStops++;
         }
         return () => {};
       },
     });
     card.previewData = null;
     card.hass = { ...demo.hass, connection, callWS: async () => demo.preview.entries };
+    window.returnToReplayDashboard = () => {
+      const replacement = document.createElement('f1-sensor-card');
+      replacement.setConfig({ modules: [{ type: 'map', fields: ['track_map', 'map_drivers'],
+        options: { view_mode: 'circular', circular_positioning: 'estimated' } }] });
+      replacement.hass = card.hass;
+      document.querySelector('#root').replaceChildren(replacement);
+      window.fixtureCard = replacement;
+    };
   });
   await page.waitForFunction(() => window.emitReplayCircle);
   const emit = sample => page.evaluate(sample => window.emitReplayCircle(sample), sample);
@@ -66,6 +79,35 @@ test('replay circle follows the playback clock and expires unsupported positions
   await expect(leader).toHaveCount(0);
   await view.getByRole('button', { name: 'Physical', exact: true }).click();
   await expect(view.locator('path.track')).toBeVisible();
+
+  await emit({ state: 'playing', asOf: 55, anchor: 50, generation: 2, epoch: 2 });
+  await view.getByRole('button', { name: 'Circular', exact: true }).click();
+  await expect(leader).toBeVisible();
+  await page.evaluate(() => {
+    window.retiredReplayEmitter = window.emitReplayCircle;
+    window.fixtureCard.remove();
+  });
+  await expect(view).toHaveCount(0);
+  await expect.poll(() => page.evaluate(() => window.replayAnalysisStops)).toBe(1);
+  await page.clock.runFor(3000);
+  await page.evaluate(() => window.returnToReplayDashboard());
+  await expect.poll(() => page.evaluate(() => window.replayAnalysisCallbacks.length)).toBe(2);
+  await page.evaluate(() => window.retiredReplayEmitter({ state: 'playing' }));
+  await expect(leader).toHaveCount(0);
+  await emit({ state: 'playing', asOf: 60, playback: 66, anchor: 50, generation: 2, epoch: 2 });
+  await expect(leader).toHaveCount(0);
+  await emit({ state: 'playing', asOf: 67, anchor: 50, generation: 2, epoch: 2 });
+  await expect(leader).toBeVisible();
+  await expect(follower).toBeVisible();
+
+  await page.evaluate(() => window.replayAnalysisCallbacks.at(-1)({
+    protocol_version: 1, status: 'closed', retryable: true,
+  }));
+  await expect(leader).toHaveCount(0);
+  await page.clock.runFor(1100);
+  await expect.poll(() => page.evaluate(() => window.replayAnalysisCallbacks.length)).toBe(3);
+  await emit({ state: 'playing', asOf: 70, anchor: 50, generation: 3, epoch: 1 });
+  await expect(leader).toBeVisible();
 });
 
 async function mount(page, options, missingMap = false) {
