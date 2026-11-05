@@ -97,7 +97,7 @@
     "@semantic-release/github": {
       "undici": "^7.30.1"
     },
-    "npm": "12.2.1",
+    "npm": "12.2.2",
     "websocket-driver": "^0.7.5",
     "cheerio": {
       "undici": "^7.30.1"
