@@ -29,9 +29,7 @@ For initial rejoin, model loss as displacement backward in race-time coordinates
 
 ## Phase 2 — Basic circular map
 
-- Completed display foundation includes the circular SVG, radial finish line, physical/circular control, shared focus, mobile layout and explicit unavailable states. The pure phase and spacing module is covered by synthetic fixtures and has no renderer integration.
-- Unit-test median eligibility, provisional state, sign, wrap, lap deficit and missing values. Extend modular browser tests for default physical configuration, toggling, focus, full grid at narrow width, reduced motion and seeking.
-- Compare timing tower and circle manually at known replay instants and exercise a touch dashboard. Finish when physical behavior is preserved and both live and replay adapters satisfy the same model contract. Main risks are stale positions, overlap and motion across discontinuities.
+**Complete for the opt-in estimated scope.** [PR #10](https://github.com/scottmason5574-oss/f1_sensor/pull/10) merged the circular display, shared driver focus, explicit unavailable states, smooth replay animation, dashboard subscription recovery, pause and seek behavior, and classification-based ordering. Physical Track Map remains the default. The [milestone handoff](./CIRCLE_OF_DOOM_NEXT_STEPS.md) records the Unraid checks and deferred runtime evidence.
 
 ### M2-2B-1 owner-approved estimated positioning
 
@@ -39,15 +37,19 @@ Set the Track Map module's `options.circular_positioning` to `estimated` to opt 
 
 An ordered, timestamped one-lap increment for the same observed leader anchors zero degrees at the radial finish line. Use a sparse `LastLapTime` value carried with that driver increment as a provisional duration sample. Use the median of up to five such samples in the same leader epoch. A race-wide lap update, merged bootstrap and replay seek checkpoint supply no crossing anchor. Known pit involvement, a non-green track, a correction or a discontinuity invalidate the affected evidence. Missing or ambiguous evidence leaves placement unavailable.
 
-Live and Live Delay advance from the released timing frame for at most five seconds. This keeps the configured delay in effect. Replay uses the delivered archive timing offset, bounded by the playback position. The display steps with those frames and does not extrapolate between them. After a seek it waits for fresh ordered driver transitions. Fresh, numeric gaps to the same leader set the followers' clockwise offsets. Lapped tokens, intervals to the car ahead and transient lap-counter differences supply no gap estimate.
+Live and Live Delay advance from the released timing frame for at most five seconds. This keeps the configured delay in effect. Replay uses the delivered archive timing offset, bounded by the playback position. The renderer animates between updates using the replay clock and stops advancing while paused. After a seek it waits for fresh ordered driver transitions. Fresh, numeric gaps to the same leader set the followers' clockwise offsets. Lapped tokens, intervals to the car ahead and transient lap-counter differences supply no gap estimate.
 
 The earlier certification requirements apply to any future verified positioning claim. This mode displays **Estimated** and uses approximate, timing-derived positions. Synthetic tests exercise subscription, timing and rendering behavior without establishing authentic feed semantics.
 
 ## Phase 3 — Straight-line pit window
 
-- Requires the Phase 2 selection and frame plus approved fallback provenance. Add the prediction module and linear renderer with selected driver, loss range, projected slot, neighboring cars and gap labels.
-- Test missing fallback, scenario transitions, empty traffic, ties and lapped traffic. Assert that the same input yields the same loss, prediction and confidence in both views. Manually inspect narrow layout and delayed scenario changes.
-- Finish when both views display consistent, labeled provisional estimates or a reason for unavailability. Main risk is treating circuit-level fallback as measured race loss.
+**Planned.** Phase 3 will reuse Phase 2 driver selection and timing inputs.
+
+- Estimate pit-loss time and expose its provenance, including whether it comes from an approved circuit fallback. Show an unavailable state when suitable evidence is missing.
+- Show the selected driver and nearby traffic in a straight-line pit window. Predict a rejoin position and a potential rank range when the inputs support them.
+- Use one prediction calculation for the straight-line and circular views. Keep the loss range, confidence and projected order consistent across both.
+- Consume timing from the active live, Live Delay or replay source. Preserve delay and replay boundaries and clear stale predictions when the source or generation changes.
+- Cover missing fallback, empty or lapped traffic, ties, scenario transitions and uncertain inputs. Check both renderers with the same fixtures and inspect the narrow layout.
 
 ## Phase 4 — Virtual rejoin and observed loss
 
