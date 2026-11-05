@@ -15,6 +15,7 @@ const teamRadioData = await load('./team-radio-data.js');
 const analysisData = await load('./analysis-data.js');
 const minisectorData = await load('./minisector-data.js');
 const telemetryData = await load('./telemetry-data.js');
+const { estimatedCircle } = await load('./circle-data.js');
 const { mapModel, mapExpiry } = await load('./map-data.js');
 const { hasF1Action, dispatchF1CardAction } = await load('../platform/actions.js');
 
@@ -355,10 +356,15 @@ export class F1SensorCard extends LitElement {
       this.stopMap?.(); this.stopMap = null; this.mapKey = mapKey; this.mapState = { data: null, status: 'loading' };
       if (mapKey) this.stopMap = watchTrackMap(this.sourceHass, mapKey, state => { this.mapState = state; this.revision++; });
     }
-    const analysisKey = entry && this.config.modules.some(module => usable(module) && MODULES[module.type]?.stream === 'analysis') && data.spoilerState(this.sourceHass, entry, this.config.context.spoilers) === 'clear' ? entry.entry_id : '';
+    const analysisKey = entry && this.config.modules.some(module => usable(module) && (MODULES[module.type]?.stream === 'analysis' ||
+      module.type === 'map' && module.options.circular_positioning === 'estimated')) && data.spoilerState(this.sourceHass, entry, this.config.context.spoilers) === 'clear' ? entry.entry_id : '';
     if (analysisKey !== this.analysisKey) {
       this.stopAnalysis?.(); this.stopAnalysis = null; this.analysisKey = analysisKey; this.analysisState = { data: null, status: 'loading' };
-      if (analysisKey) this.stopAnalysis = watchAnalysis(this.sourceHass, analysisKey, state => { this.analysisState = state; this.revision++; });
+      if (analysisKey) this.stopAnalysis = watchAnalysis(this.sourceHass, analysisKey, state => {
+        if (state.data !== this.analysisState.data) this.analysisReceivedAt = performance.now();
+        this.analysisState = state;
+        this.revision++;
+      });
     }
     const minisectorContexts = new Map();
     if (entry && data.spoilerState(this.sourceHass, entry, this.config.context.spoilers) === 'clear') {
@@ -459,7 +465,11 @@ export class F1SensorCard extends LitElement {
   freeze() {
     if (!this.frozen) {
       this.savedSources.update(this.sourceHass, this.entry, this.config, Boolean(this.modelPreview));
-      this.frozenModels = this.buildModels(); this.frozenAt = this.modelPreview?.now ?? Date.now();
+      this.frozenModels = this.buildModels();
+      for (const model of this.frozenModels.values()) {
+        if (model.circle) model.circle = { reason: 'context', rows: [] };
+      }
+      this.frozenAt = this.modelPreview?.now ?? Date.now();
       this.frozenFocus = { ...this.focus };
       this.frozenGeneration = this.savedSources.viewGeneration;
       const roster = data.source(this.sourceHass, this.entry, 'driver_list');
@@ -664,6 +674,30 @@ export class F1SensorCard extends LitElement {
       if (module.type === 'map') {
         const driverPositions = data.source(viewHass, viewEntry, 'driver_positions');
         Object.assign(model, mapModel(this.modelPreview?.map ?? this.mapState.data?.snapshot, effective, focus, this.modelPreview?.now ?? Date.now(), driverPositions.status === 'available' ? data.array(driverPositions.attributes.drivers) : []));
+        if (effective.options.circular_positioning === 'estimated') {
+          const available = !this.frozen && this.sourceHass.connection?.connected !== false && this.analysisKey === entry?.entry_id && this.analysisState.status === 'ready';
+          const analysis = this.modelPreview?.analysis ?? (available ? this.analysisState.data : null);
+          const snapshot = this.modelPreview?.map ?? this.mapState.data?.snapshot;
+          model.circle = estimatedCircle(analysis, snapshot, (this.modelPreview?.now ?? Date.now()) / 1000,
+            this.modelPreview ? undefined : this.analysisReceivedAt);
+          if (!model.seeking && model.circle.reason !== 'context' && analysis?.status === 'ready') {
+            const roster = new Map((model.roster ?? []).map(row => [row.id, row]));
+            const driver = effective.driver || focus.driver, team = effective.team || focus.team;
+            for (const item of analysis.drivers ?? []) {
+              if (!Number.isSafeInteger(item.driver_number) || item.driver_number <= 0) continue;
+              const id = String(item.driver_number);
+              if (roster.has(id)) continue;
+              const selected = Boolean((driver || team) && (!driver || [id, item.tla].includes(String(driver))) && (!team || item.team === team));
+              if (effective.options.focus === 'filter' && (driver || team) && !selected) continue;
+              roster.set(id, { id, name: item.name ?? item.tla ?? id, driver: item.tla ?? id, team: item.team, team_color: item.team_color, selected });
+            }
+            const positions = new Map((analysis.timing ?? [])
+              .filter(row => Number.isSafeInteger(row.position) && row.position > 0)
+              .map(row => [String(row.driver_number), row.position]));
+            model.roster = [...roster.values()].sort((a, b) =>
+              (positions.get(a.id) ?? Infinity) - (positions.get(b.id) ?? Infinity) || Number(a.id) - Number(b.id));
+          }
+        }
         const laps = data.source(viewHass, viewEntry, 'race_lap_count'), trackStatus = data.source(viewHass, viewEntry, 'track_status');
         const currentLap = Number(laps.state), totalLaps = Number(laps.attributes.total_laps);
         model.lap = laps.status === 'available' && Number.isInteger(currentLap) && currentLap >= 0 ? currentLap : null;

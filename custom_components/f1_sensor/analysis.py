@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import suppress
 from copy import deepcopy
@@ -658,6 +658,18 @@ class Phase4AnalysisStore:
         self._track_status: str | None = None
         self._drivers: dict[str, dict[str, Any]] = {}
         self._timing: dict[str, dict[str, Any]] = {}
+        self._circle_clock: tuple[Any, ...] | None = None
+        self._circle_watermark: float | None = None
+        self._circle_key: tuple[Any, ...] | None = None
+        self._circle_session_key: str | None = None
+        self._circle_lap: int | None = None
+        self._circle_last_lap_time: str | None = None
+        self._circle_pit_count: int | None = None
+        self._circle_anchor: float | None = None
+        self._circle_awaiting_duration = False
+        self._circle_as_of: float | None = None
+        self._circle_released: float | None = None
+        self._circle_durations: deque[tuple[int, float]] = deque(maxlen=5)
         self._gap_observations: dict[str, dict[str, Any]] = {}
         self._gap_leader: str | None = None
         self._gap_epoch = 0
@@ -799,6 +811,10 @@ class Phase4AnalysisStore:
         )
 
     def _reset_session(self) -> None:
+        self._circle_clock = None
+        self._circle_watermark = None
+        self._reset_circle()
+        self._circle_session_key = None
         self._replay_gaps = ReplayGapState()
         self._replay_gap_checkpoint_offset = None
         self._replay_gap_session_observed = False
@@ -858,6 +874,9 @@ class Phase4AnalysisStore:
             self._replay_gap_session_observed = not isinstance(
                 payload, ReplayUnclockedSessionInfo
             )
+        self._circle_session_key = (
+            _text(payload.get("Key") or payload.get("Path")) or self._circle_session_key
+        )
         self._session_name = _text(payload.get("Name") or payload.get("Type"))
         if session_type := _text(payload.get("Type")):
             race_session = session_type.casefold() == "race"
@@ -883,6 +902,8 @@ class Phase4AnalysisStore:
         if status is None or status == self._session_status:
             return
         self._session_status = status
+        if self._phase() != "live":
+            self._reset_circle()
         final = status in {"Finished", "Finalised", "Ends"}
         self._event(
             identity=f"status:{status}",
@@ -903,6 +924,8 @@ class Phase4AnalysisStore:
         if status is None or status == self._track_status:
             return
         self._track_status = status
+        if status != "1":
+            self._reset_circle()
         disrupted = status in {"2", "4", "5", "6", "7"}
         self._event(
             identity=f"track:{status}:{_utc_text(payload)}",
@@ -955,7 +978,30 @@ class Phase4AnalysisStore:
             return
         updated_drivers: list[int] = []
         lines = _items(payload.get("Lines"))
-        for key, item in lines:
+        retrograde, equal_time = self._circle_timing_order(payload)
+        if retrograde and any(
+            "Position" in item
+            or (
+                self._circle_key is not None
+                and key == self._circle_key[3]
+                and any(
+                    field in item
+                    for field in (
+                        "NumberOfLaps",
+                        "LastLapTime",
+                        "InPit",
+                        "PitOut",
+                        "NumberOfPitStops",
+                        "Stopped",
+                        "Retired",
+                    )
+                )
+            )
+            for key, item in lines
+        ):
+            self._reset_circle()
+        # Keep rejected rows out of the merged leader and pit state.
+        for key, item in () if retrograde else lines:
             target = self._timing.setdefault(key, {})
             _deep_merge(target, item)
             if (driver := _as_int(key)) is not None:
@@ -988,6 +1034,9 @@ class Phase4AnalysisStore:
                 self._replay_gap_checkpoint_offset = None
                 self._replay_gaps.apply_payload(offset, payload)
         self._record_gap_updates(payload, lines)
+        if retrograde:
+            return
+        self._record_circle_timing(payload, lines, equal_time=equal_time)
         self._capture_strategy_laps(updated_drivers)
         self._detect_position_exchanges()
         self._detect_battles()
@@ -1060,6 +1109,203 @@ class Phase4AnalysisStore:
                     "leader": _as_int(leader),
                     "epoch": self._gap_epoch,
                 }
+
+    def _reset_circle(self) -> None:
+        self._circle_key = None
+        self._circle_lap = None
+        self._circle_last_lap_time = None
+        self._circle_pit_count = None
+        self._circle_anchor = None
+        self._circle_awaiting_duration = False
+        self._circle_as_of = None
+        self._circle_released = None
+        self._circle_durations.clear()
+
+    def _circle_timing_order(self, payload: Any) -> tuple[bool, bool]:
+        """Check source order before sparse rows can alter the timing cache."""
+        provider = self._provider()
+        generation = getattr(self._bus, "timing_generation", None)
+        clock = (self._session_id, provider, generation)
+        if clock != self._circle_clock:
+            self._reset_circle()
+            self._circle_clock = clock
+            self._circle_watermark = None
+        if not self._race_session or not self._session_id or generation is None:
+            return False, False
+        if provider == "f1_live" and isinstance(payload, LiveTimingDelta):
+            stamp = payload.source_time
+        elif provider == "replay" and isinstance(payload, ReplayTimingDelta):
+            stamp = payload.offset
+        else:
+            return False, False
+        if not math.isfinite(stamp):
+            return False, False
+        previous = self._circle_watermark
+        if previous is not None and stamp <= previous:
+            return stamp < previous, stamp == previous
+        self._circle_watermark = stamp
+        return False, False
+
+    def _record_circle_timing(
+        self,
+        payload: Any,
+        lines: list[tuple[str, Mapping[str, Any]]],
+        *,
+        equal_time: bool,
+    ) -> None:
+        """Keep provisional phase evidence from ordered, released timing deltas."""
+        provider = self._provider()
+        generation = getattr(self._bus, "timing_generation", None)
+        if provider == "f1_live" and isinstance(payload, LiveTimingDelta):
+            stamp, leader, epoch = (
+                payload.source_time,
+                self._gap_leader,
+                self._gap_epoch,
+            )
+        elif (
+            provider == "replay"
+            and isinstance(payload, ReplayTimingDelta)
+            and self._replay_gap_session_observed
+        ):
+            gaps = self._replay_gaps
+            stamp, leader, epoch = payload.offset, gaps.leader, gaps.epoch
+        else:
+            self._reset_circle()
+            return
+        if (
+            generation is None
+            or not self._circle_session_key
+            or not self._race_session
+            or self._phase() != "live"
+            or self._track_status != "1"
+            or _as_int(leader) is None
+            or not math.isfinite(stamp)
+        ):
+            self._reset_circle()
+            return
+
+        key = (self._session_id, provider, generation, leader, epoch)
+        if key != self._circle_key:
+            self._reset_circle()
+            self._circle_key = key
+        previous = self._circle_as_of
+        if previous is not None and stamp - previous > 15:
+            self._reset_circle()
+            self._circle_key = key
+            previous = None
+        row = dict(lines).get(leader, {})
+        timing = self._timing.get(leader, {})
+        if any(
+            _as_bool(timing.get(field))
+            for field in ("InPit", "PitOut", "Stopped", "Retired")
+        ):
+            self._reset_circle()
+            return
+        pit_count = _as_int(timing.get("NumberOfPitStops"))
+        if (
+            self._circle_pit_count is not None
+            and pit_count is not None
+            and pit_count != self._circle_pit_count
+        ):
+            self._reset_circle()
+            return
+        self._circle_pit_count = pit_count
+        if previous is None or stamp > previous:
+            self._circle_as_of = stamp
+            self._circle_released = time()
+
+        patch = row.get("LastLapTime")
+        has_lap_time = "LastLapTime" in row and (
+            not isinstance(patch, Mapping) or "Value" in patch
+        )
+        raw = _value_text(patch)
+        revised_time = has_lap_time and raw != self._circle_last_lap_time
+        if "NumberOfLaps" not in row:
+            # Replay can deliver the duration just after the lap counter.
+            # Keep the crossing timestamp from the counter and bind only a
+            # nearby, ordered value in the same uninterrupted leader epoch.
+            if (
+                self._circle_awaiting_duration
+                and self._circle_anchor is not None
+                and 0 < stamp - self._circle_anchor <= 1
+                and not equal_time
+                and has_lap_time
+            ):
+                self._circle_awaiting_duration = False
+                self._record_circle_duration(self._circle_lap, raw)
+            elif revised_time and self._circle_anchor is not None:
+                self._reset_circle()
+            return
+        lap = _as_int(row["NumberOfLaps"])
+        before = self._circle_lap
+        if (
+            lap is None
+            or lap < 0
+            or (
+                before is not None
+                and lap != before
+                and (lap != before + 1 or previous is None or stamp <= previous)
+            )
+        ):
+            self._reset_circle()
+            return
+        if equal_time:
+            if revised_time and self._circle_anchor is not None:
+                self._reset_circle()
+            return
+        self._circle_lap = lap
+        if before is None or lap == before:
+            if before is not None and revised_time and self._circle_anchor is not None:
+                self._reset_circle()
+            else:
+                self._circle_last_lap_time = raw or self._circle_last_lap_time
+            return
+
+        if lap in self._pit_context.get(int(leader), ()):
+            self._reset_circle()
+            return
+        self._circle_anchor = stamp
+        self._circle_awaiting_duration = provider == "replay" and not has_lap_time
+        self._record_circle_duration(lap, raw)
+
+    def _record_circle_duration(self, lap: int | None, raw: str | None) -> None:
+        self._circle_last_lap_time = raw
+        duration = _as_float(raw)
+        if (
+            lap is not None
+            and raw
+            and re.fullmatch(r"(?:[0-9]+:[0-5][0-9]|[0-9]+)(?:\.[0-9]+)?", raw)
+            and duration is not None
+            and math.isfinite(duration)
+            and duration > 0
+        ):
+            self._circle_durations.append((lap, duration))
+
+    def _circle_snapshot(self) -> dict[str, Any] | None:
+        if self._circle_key is None or self._phase() != "live":
+            return None
+        session, provider, generation, leader, epoch = self._circle_key
+        if (
+            session != self._session_id
+            or provider != self._provider()
+            or generation != getattr(self._bus, "timing_generation", None)
+        ):
+            return None
+        durations = [
+            duration
+            for lap, duration in self._circle_durations
+            if self._circle_lap is not None and lap > self._circle_lap - 5
+        ]
+        return {
+            "session_key": self._circle_session_key,
+            "generation": generation,
+            "leader": _as_int(leader),
+            "epoch": epoch,
+            "anchor": self._circle_anchor,
+            "as_of": self._circle_as_of,
+            "released_at": self._circle_released if provider == "f1_live" else None,
+            "duration_seconds": median(durations) if durations else None,
+        }
 
     def _current_stint(self, driver: int) -> tuple[int, Mapping[str, Any]]:
         app = self._timing_app.get(str(driver), {})
@@ -1141,7 +1387,16 @@ class Phase4AnalysisStore:
                 pit = _mapping(item.get("PitStop")) or item
                 lap = _as_int(pit.get("Lap") or item.get("Lap"))
                 if lap is not None:
-                    self._pit_context.setdefault(driver, set()).add(lap)
+                    known_laps = self._pit_context.setdefault(driver, set())
+                    if (
+                        lap not in known_laps
+                        and self._circle_key is not None
+                        and driver == _as_int(self._circle_key[3])
+                        and self._circle_lap is not None
+                        and self._circle_lap - 5 <= lap <= self._circle_lap + 1
+                    ):
+                        self._reset_circle()
+                    known_laps.add(lap)
                 self._event(
                     identity=f"pit:{driver}:{lap}:{item_key}",
                     category="pit",
@@ -1465,6 +1720,14 @@ class Phase4AnalysisStore:
                         state.get("IntervalToPositionAhead") or state.get("Interval")
                     ),
                     "last_lap": _value_text(state.get("LastLapTime")),
+                    **(
+                        {"circle_inactive": True}
+                        if any(
+                            _as_bool(state.get(field))
+                            for field in ("InPit", "PitOut", "Stopped", "Retired")
+                        )
+                        else {}
+                    ),
                 }
             )
         return sorted(
@@ -1627,6 +1890,7 @@ class Phase4AnalysisStore:
             "drivers": list(self._drivers.values()),
             "timing": self._timing_snapshot(),
             "reference_lap": self._reference_lap_snapshot(),
+            "estimated_circle": self._circle_snapshot(),
             **(
                 {"replay_race_gap": self._replay_gap_snapshot()}
                 if self._provider() == "replay"

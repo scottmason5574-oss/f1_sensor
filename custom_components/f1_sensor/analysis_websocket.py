@@ -287,6 +287,8 @@ def _analysis_payload(runtime: F1RuntimeData) -> dict[str, Any]:
             "session_id": getattr(replay_index, "session_id", None),
             "state": getattr(getattr(replay, "state", None), "value", "idle"),
             "position_ms": replay_status.get("position_ms"),
+            "clock_position_ms": replay_status.get("clock_position_ms"),
+            "clock_rate": replay_status.get("clock_rate"),
             "duration_ms": replay_status.get("duration_ms"),
             "paused": replay_status.get("paused", False),
         },
@@ -401,11 +403,12 @@ class _AnalysisBroadcastHub:
                 self._runtime.capabilities.requested_streams
             ):
                 return
-            should_run = bool(getattr(live.availability, "is_live", False))
-            if requested and should_run:
-                await bus.start()
-            elif not requested:
-                await bus.async_close()
+            # Replay owns the transport even when the last dashboard leaves.
+            if not getattr(live.availability, "replay_locked", False):
+                if requested and getattr(live.availability, "is_live", False):
+                    await bus.start()
+                elif not requested:
+                    await bus.async_close()
             self._runtime.capabilities.active_streams = bus.active_streams
             legacy = self._runtime.get("signalr_stream_capabilities")
             if isinstance(legacy, dict):
@@ -476,6 +479,7 @@ class _AnalysisSubscription:
         self._hub = hub
         self._throttle_seconds = throttle_seconds
         self._last_sent = 0.0
+        self._last_replay_state: str | None = None
         self._pending_handle: asyncio.TimerHandle | None = None
         self._pending_payload: dict[str, Any] | None = None
         self._closed = False
@@ -492,6 +496,19 @@ class _AnalysisSubscription:
         if self._closed:
             return
         self._pending_payload = payload
+        replay_state = (
+            payload.get("replay", {}).get("state")
+            if payload.get("provider") == "replay"
+            else None
+        )
+        if (
+            replay_state in {"playing", "paused", "seeking"}
+            and replay_state != self._last_replay_state
+        ):
+            if self._pending_handle is not None:
+                self._pending_handle.cancel()
+            self._send_pending()
+            return
         if self._pending_handle is not None:
             return
         elapsed = self._hass.loop.time() - self._last_sent
@@ -499,19 +516,30 @@ class _AnalysisSubscription:
         if delay == 0:
             self._send_pending()
         else:
-            self._pending_handle = self._hass.loop.call_later(delay, self._send_pending)
+            self._pending_handle = self._hass.loop.call_later(
+                delay, self._send_pending, True
+            )
 
     @callback
-    def _send_pending(self) -> None:
+    def _send_pending(self, refresh_replay: bool = False) -> None:
         self._pending_handle = None
         payload = self._pending_payload
         self._pending_payload = None
         if payload is not None:
+            if refresh_replay and payload.get("replay", {}).get("state") == "playing":
+                # Sample the replay clock at delivery rather than projecting
+                # from a snapshot that has been waiting in the throttle queue.
+                payload = self._hub.payload()
             self._send(payload)
 
     @callback
     def _send(self, payload: dict[str, Any]) -> None:
         self._last_sent = self._hass.loop.time()
+        self._last_replay_state = (
+            payload.get("replay", {}).get("state")
+            if payload.get("provider") == "replay"
+            else None
+        )
         self._connection.send_event(self._msg_id, payload)
 
     @callback

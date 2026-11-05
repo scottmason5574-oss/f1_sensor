@@ -549,12 +549,17 @@ async def test_track_map_v2_resync_returns_latest_full_snapshot(hass) -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("availability_is_live", "expected_started", "expected_closed"),
-    [(False, False, True), (True, True, False)],
+    ("availability_is_live", "replay_locked", "expected_started", "expected_closed"),
+    [
+        (False, False, False, True),
+        (True, False, True, False),
+        (True, True, False, False),
+    ],
 )
 async def test_track_map_subscription_adds_and_removes_transient_stream_demand(
     hass,
     availability_is_live: bool,
+    replay_locked: bool,
     expected_started: bool,
     expected_closed: bool,
 ) -> None:
@@ -592,7 +597,9 @@ async def test_track_map_subscription_adds_and_removes_transient_stream_demand(
         static=StaticRuntime(),
         live=LiveRuntime(
             bus=bus,
-            availability=SimpleNamespace(is_live=availability_is_live),
+            availability=SimpleNamespace(
+                is_live=availability_is_live, replay_locked=replay_locked
+            ),
         ),
         replay=None,
         track_map=TrackMapRuntimeData(store),

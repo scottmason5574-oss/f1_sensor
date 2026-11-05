@@ -178,8 +178,38 @@ def test_subscription_coalesces_sends_and_cancels_pending(hass) -> None:
     hub.add.return_value.assert_called_once()
 
 
+def test_replay_subscription_samples_at_send_and_delivers_state_changes(hass) -> None:
+    def replay(state, position):
+        return {
+            "provider": "replay",
+            "replay": {"state": state, "clock_position_ms": position},
+        }
+
+    connection = _Connection()
+    hub = SimpleNamespace(
+        add=Mock(return_value=Mock()), payload=Mock(return_value=replay("playing", 100))
+    )
+    subscription = ws._AnalysisSubscription(hass, connection, 5, hub, 1.0)
+    subscription.async_send_initial()
+    subscription.receive(replay("playing", 110))
+    subscription._pending_handle.cancel()
+    hub.payload.return_value = replay("playing", 120)
+    subscription._send_pending(True)
+    assert connection.events[-1] == (5, replay("playing", 120))
+
+    subscription.receive(replay("playing", 130))
+    queued = subscription._pending_handle
+    subscription.receive(replay("paused", 140))
+    assert queued.cancelled()
+    assert connection.events[-1] == (5, replay("paused", 140))
+    subscription.receive(replay("seeking", 140))
+    assert connection.events[-1] == (5, replay("seeking", 140))
+    subscription.unsubscribe()
+
+
 @pytest.mark.asyncio
-async def test_hub_demand_can_close_empty_bus_and_update_legacy_state(hass) -> None:
+@pytest.mark.parametrize("replay_locked", [False, True])
+async def test_hub_demand_respects_replay_ownership(hass, replay_locked) -> None:
     bus = SimpleNamespace(
         async_update_streams=AsyncMock(),
         start=AsyncMock(),
@@ -193,7 +223,12 @@ async def test_hub_demand_can_close_empty_bus_and_update_legacy_state(hass) -> N
     )
     legacy = {"signalr_stream_capabilities": {}}
     runtime = SimpleNamespace(
-        live=SimpleNamespace(bus=bus, availability=SimpleNamespace(is_live=False)),
+        live=SimpleNamespace(
+            bus=bus,
+            availability=SimpleNamespace(
+                is_live=replay_locked, replay_locked=replay_locked
+            ),
+        ),
         capabilities=capabilities,
         get=legacy.get,
     )
@@ -207,9 +242,14 @@ async def test_hub_demand_can_close_empty_bus_and_update_legacy_state(hass) -> N
     hub.closed = False
     hub._set_demand(active=False)
     await hass.async_block_till_done()
-    bus.async_close.assert_awaited_once()
+    assert bus.async_close.await_count == int(not replay_locked)
     assert capabilities.requested_streams == frozenset()
     assert legacy["signalr_stream_capabilities"]["requested_streams"] == frozenset()
+    if replay_locked:
+        hub._set_demand(active=True)
+        await hass.async_block_till_done()
+        bus.start.assert_not_awaited()
+        assert capabilities.requested_streams == ws.PHASE4_ANALYSIS_STREAMS
 
     no_live = object.__new__(ws._AnalysisBroadcastHub)
     no_live._runtime = SimpleNamespace(live=None)

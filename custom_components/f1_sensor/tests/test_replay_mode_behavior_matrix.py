@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 from datetime import UTC, datetime
 import json
 from pathlib import Path
@@ -545,6 +546,55 @@ async def test_replay_transport_streams_valid_frames_and_tracks_control_state(
     await transport.ensure_connection()
     await transport.close()
     assert transport._closed is True
+
+
+async def test_replay_transport_clock_freezes_during_pending_frame(
+    hass, tmp_path
+) -> None:
+    frames = tmp_path / "clock.jsonl"
+    frames.write_bytes(
+        b'{"t":0,"s":"TrackStatus","p":{"Status":"1"}}\n'
+        b'{"t":160,"s":"TrackStatus","p":{"Status":"2"}}\n'
+    )
+    transport = ReplayTransport(
+        hass,
+        ReplayIndex(
+            session_id="2026_1_2",
+            total_frames=2,
+            duration_ms=160,
+            session_started_at_ms=0,
+            frames_file=frames,
+            index_file=tmp_path / "index.json",
+        ),
+        speed_multiplier=2,
+    )
+    messages = transport.messages()
+    next_frame = None
+    try:
+        await anext(messages)
+        next_frame = asyncio.create_task(anext(messages))
+        await asyncio.sleep(0.01)
+        before_pause, rate = transport.get_playback_clock()
+        assert rate == 2
+        assert before_pause > transport.get_playback_position_ms() == 0
+
+        transport.pause()
+        paused, rate = transport.get_playback_clock()
+        assert rate == 0
+        await asyncio.sleep(0.09)
+        assert transport.get_playback_clock() == (paused, 0)
+        assert not next_frame.done()
+        assert transport.get_playback_position_ms() == 0
+
+        transport.resume()
+        await asyncio.wait_for(next_frame, timeout=1)
+        assert transport.get_playback_clock() == (160, 2)
+    finally:
+        if next_frame is not None and not next_frame.done():
+            next_frame.cancel()
+            with suppress(asyncio.CancelledError):
+                await next_frame
+        await messages.aclose()
 
 
 class _ReplayResponse:

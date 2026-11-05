@@ -2624,14 +2624,19 @@ class ReplayTransport:
                 ):
                     continue
 
-                # Calculate delay based on elapsed time
                 target_elapsed_ms = (frame_ms - start_ms) / self._speed
-                actual_elapsed = self._get_elapsed_playback_time()
-                actual_elapsed_ms = actual_elapsed * 1000
-
-                delay_ms = target_elapsed_ms - actual_elapsed_ms
-                if delay_ms > 10:  # Only sleep if > 10ms
+                # Recheck the schedule after sleeping. A pause or resume may
+                # have changed when this frame is due.
+                while not self._closed:
+                    await self._pause_event.wait()
+                    delay_ms = (
+                        target_elapsed_ms - self._get_elapsed_playback_time() * 1000
+                    )
+                    if delay_ms <= 10:
+                        break
                     await asyncio.sleep(delay_ms / 1000)
+                if self._closed:
+                    continue
 
                 if frame_ms != self._current_position_ms:
                     self.frames_at_position = 0
@@ -2734,12 +2739,20 @@ class ReplayTransport:
         if self._playback_started_at is None:
             return 0.0
 
-        total_elapsed = time.monotonic() - self._playback_started_at
-        paused_now = 0.0
-        if self._paused and self._pause_started_at:
-            paused_now = time.monotonic() - self._pause_started_at
+        now = self._pause_started_at if self._paused else None
+        if now is None:
+            now = time.monotonic()
+        return max(0.0, now - self._playback_started_at - self._total_paused_duration)
 
-        return total_elapsed - self._total_paused_duration - paused_now
+    def get_playback_clock(self) -> tuple[float, float]:
+        """Sample the same replay clock that schedules the archive frames."""
+        position = self._playback_start_ms + self._get_elapsed_playback_time() * (
+            self._speed * 1000
+        )
+        return (
+            min(self._index.duration_ms, max(self._current_position_ms, position)),
+            0.0 if self._paused or self._playback_started_at is None else self._speed,
+        )
 
     def get_playback_position_ms(self) -> int:
         """Get current playback position in milliseconds."""
@@ -3621,8 +3634,11 @@ class ReplayController:
                     index, log=False
                 )
                 duration_ms = index.duration_ms
+            clock_position, clock_rate = self._transport.get_playback_clock()
             return {
                 "position_ms": self._transport.get_playback_position_ms(),
+                "clock_position_ms": clock_position,
+                "clock_rate": clock_rate,
                 "session_start_ms": session_start_ms,
                 "playback_start_ms": playback_start_ms,
                 "duration_ms": duration_ms,

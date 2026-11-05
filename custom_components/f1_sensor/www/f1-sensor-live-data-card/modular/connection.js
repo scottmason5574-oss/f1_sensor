@@ -156,6 +156,7 @@ export function watchAnalysis(hass, entryId, callback) {
     const unsubscribe = await hass.connection.subscribeMessage(payload => {
       if (!scope.active()) return;
       if (payload?.protocol_version !== 1) { scope.error(new Error('Unsupported F1 analysis protocol')); return; }
+      if (payload.status === 'closed') { scope.error(new Error('F1 Sensor entry was unloaded')); return; }
       scope.emit(payload);
     }, { type: 'f1_sensor/analysis/subscribe', entry_id: entryId, protocol_version: 1, throttle_ms: 500 }, { resubscribe: false });
     // The subscription sends its own initial snapshot. A parallel GET could
