@@ -150,3 +150,90 @@ export function predictPitDisplacement(frame, options = {}, loss) {
     // Negation reverses the interval endpoints. Never average away the range.
     projectedDisplacementSeconds: { min: -loss.maxSeconds, max: -loss.minSeconds } };
 }
+
+/** Pairwise comparison only, under an explicit shared frozen equal-pace metric. */
+export function compareRaceTime(frame, options = {}, reference, leftId, rightId) {
+  const unavailable = reason => ({ status: 'unavailable', reason, relation: null,
+    differenceSeconds: null, left: null, right: null });
+  const horizon = options?.horizon;
+  if (!sameContext(frame?.context, options?.expectedContext)) return unavailable('context_mismatch');
+  if (frame.invalidated !== false) return unavailable('invalidated');
+  if (!Number.isFinite(frame.asOf) || frame.asOf < 0 || !Number.isFinite(options.maxAge) ||
+      options.maxAge < 0) return unavailable('invalid_clock');
+  if (!object(horizon) || !['pit_exit', 'in_out_window'].includes(horizon.kind) ||
+      !text(horizon.boundaryId) || !positive(horizon.secondsFromAsOf)) return unavailable('invalid_horizon');
+  const comparisonTime = frame.asOf + horizon.secondsFromAsOf;
+  if (!Number.isFinite(comparisonTime) || comparisonTime <= frame.asOf) return unavailable('invalid_horizon');
+  if (!text(frame.circuitId) || !text(frame.layoutId) || !Number.isSafeInteger(frame.season) ||
+      !['Race', 'Sprint'].includes(frame.sessionType)) return unavailable('unsupported_session');
+  for (const observation of [frame.session, frame.track, reference]) {
+    const reason = observationReason(observation, frame, options.maxAge);
+    if (reason) return unavailable(reason);
+  }
+  const scenario = ['1', '4', '6'].includes(frame.track.code)
+    ? { '1': 'green', '4': 'sc', '6': 'vsc' }[frame.track.code] : null;
+  if (!scenario || frame.session.state !== 'started') return unavailable('unsupported_state');
+  if (reference.model !== 'frozen_equal_pace' || reference.scenario !== scenario ||
+      !text(reference.justification) || !text(reference.id) || !positive(reference.seconds) ||
+      !['known', 'provisional'].includes(reference.confidence) ||
+      !Number.isFinite(reference.validThrough) || reference.validThrough < comparisonTime ||
+      ['circuitId', 'layoutId', 'season', 'sessionType'].some(key => reference[key] !== frame[key])) {
+    return unavailable('unsupported_pace_reference');
+  }
+  if (!text(frame.leaderId) || !text(leftId) || !text(rightId) || !Array.isArray(frame.drivers)) return unavailable('missing_driver');
+  const ids = [frame.leaderId, leftId, rightId];
+  if (ids.some(id => frame.drivers.filter(row => row?.driverId === id).length !== 1)) return unavailable('missing_or_duplicate_driver');
+  const coordinate = row => {
+    const refuse = reason => ({ driverId: row.driverId, status: 'unavailable', reason,
+      lapDeficit: count(row.lapDeficit) ? row.lapDeficit : null, coordinateSeconds: null });
+    const reason = observationReason(row, frame, options.maxAge);
+    if (reason) return refuse(reason);
+    // Age tolerance cannot transport a gap to another instant. No hidden extrapolation.
+    if (row.eventTime !== frame.asOf || row.leaderId !== frame.leaderId) return refuse('incompatible_anchor_time');
+    if (!count(row.lapDeficit)) return refuse('unknown_lap_deficit');
+    if (row.gapKind !== 'leader_relative_residual_seconds' || !Number.isFinite(row.gapSeconds) ||
+        row.gapSeconds < 0 || row.gapSeconds >= reference.seconds) return refuse('invalid_residual');
+    if (!Number.isSafeInteger(row.position) || row.position < 1 ||
+        (row.driverId === frame.leaderId ? row.position !== 1 || row.lapDeficit !== 0 || row.gapSeconds !== 0 : row.position === 1)) return refuse('invalid_classification');
+    if (row.state !== 'racing' || row.inPit !== false || row.pitOut !== false) return refuse('unsupported_driver_state');
+    const shift = row.displacement;
+    if (!object(shift) || !sameContext(shift.context, frame.context) || shift.asOf !== frame.asOf ||
+        shift.scenario !== scenario || !['known', 'provisional'].includes(shift.confidence) ||
+        !['known', 'provisional'].includes(row.confidence)) return refuse('invalid_displacement');
+    const shiftReason = observationReason(shift, frame, options.maxAge);
+    if (shiftReason) return refuse(shiftReason);
+    if (!object(shift.horizon) || ['kind', 'boundaryId', 'secondsFromAsOf'].some(key => shift.horizon[key] !== horizon[key])) return refuse('incompatible_horizon');
+    if (!Number.isFinite(shift.min) || !Number.isFinite(shift.max) || shift.min > shift.max ||
+        shift.max > 0 || shift.min < -horizon.secondsFromAsOf) return refuse('invalid_displacement');
+    const base = -(row.lapDeficit * reference.seconds + row.gapSeconds);
+    const min = base + horizon.secondsFromAsOf + shift.min, max = base + horizon.secondsFromAsOf + shift.max;
+    if (![base, min, max].every(Number.isFinite)) return refuse('coordinate_overflow');
+    return { driverId: row.driverId, position: row.position, lapDeficit: row.lapDeficit,
+      gapSeconds: row.gapSeconds, eventTime: row.eventTime, availableAt: row.availableAt,
+      status: [reference.confidence, row.confidence, shift.confidence].includes('provisional') ? 'provisional' : 'known',
+      reason: null, coordinateSeconds: { min, max }, baseSeconds: base,
+      displacement: structuredClone(shift) };
+  };
+  const leader = coordinate(frame.drivers.find(row => row.driverId === frame.leaderId));
+  if (leader.status === 'unavailable') return unavailable('unavailable_leader');
+  const left = coordinate(frame.drivers.find(row => row.driverId === leftId));
+  const right = coordinate(frame.drivers.find(row => row.driverId === rightId));
+  const result = { status: 'unavailable', reason: null, hypothetical: true,
+    context: copyContext(frame.context), asOf: frame.asOf, comparisonTime,
+    horizon: { kind: horizon.kind, boundaryId: horizon.boundaryId, secondsFromAsOf: horizon.secondsFromAsOf },
+    reference: structuredClone(reference), leader, left, right,
+    relation: null, differenceSeconds: null };
+  if ([left, right].some(row => row.status === 'unavailable')) return { ...result, reason: 'unavailable_driver' };
+  // Classification is corroboration, never a tie breaker or a substitute for timing.
+  if (leftId !== rightId && (left.position === right.position ||
+      (left.position < right.position ? left.baseSeconds < right.baseSeconds : left.baseSeconds > right.baseSeconds))) {
+    return { ...result, reason: 'incompatible_classification' };
+  }
+  const a = left.coordinateSeconds, b = right.coordinateSeconds;
+  const difference = leftId === rightId ? { min: 0, max: 0 } : { min: a.min - b.max, max: a.max - b.min };
+  if (!Number.isFinite(difference.min) || !Number.isFinite(difference.max)) return { ...result, reason: 'coordinate_overflow' };
+  const tie = difference.min === 0 && difference.max === 0;
+  return { ...result, status: [leader.status, left.status, right.status].includes('provisional') ? 'provisional' : 'known',
+    differenceSeconds: difference,
+    relation: tie ? 'tie' : difference.min > 0 ? 'ahead' : difference.max < 0 ? 'behind' : 'overlap' };
+}
