@@ -16,7 +16,10 @@ const {
   isUntaggedRelease,
   replaceEditorial
 } = require('./release-editorial.cjs');
-const run = (command, args, options={}) => execFileSync(command,args,{encoding:'utf8',...options});
+const {githubApi} = require('./release-cli.cjs');
+const run = (command, args, options={}) => command === 'gh'
+  ? githubApi(args)
+  : execFileSync(command,args,{encoding:'utf8',...options});
 
 function lines(value) {
   return String(value || '').trim().split('\n').filter(Boolean);
@@ -132,7 +135,9 @@ async function main() {
   if (!['main','beta'].includes(branch)) throw new Error('Releases require beta or main');
   const createRc = process.env.CREATE_RC === 'true';
   if (createRc && branch !== 'beta') throw new Error('Create RC requires the beta branch.');
+  console.info('Fetch semantic-release notes: start');
   fetchReleaseNotes();
+  console.info('Fetch semantic-release notes: complete');
   const releases = listReleases();
   const tags = mergedReleaseTags();
   const stage = releaseStage({branch, createRc, tags});
