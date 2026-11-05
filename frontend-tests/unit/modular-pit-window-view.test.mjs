@@ -1,0 +1,11 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import { pitWindowPresentation } from '../../custom_components/f1_sensor/www/f1-sensor-live-data-card/modular/pit-window-presentation.js';
+import { syntheticPitWindow, identities } from '../fixtures/pit-window-demo.js';
+const model=scenario=>pitWindowPresentation(syntheticPitWindow(scenario),identities,'1');
+test('synthetic exact slot and horizon labels',()=>{const m=model('exact');assert.equal(m.slot,'Hypothetical slot 2');assert.equal(m.type,'Pit-exit comparison');assert.match(m.horizon,/\+200 s/);assert.match(m.source,/synthetic/);});
+test('uncertain slots and overlap preserve ranges without inventing positions',()=>{assert.equal(model('uncertain').slot,'Hypothetical slots 1–3');const m=model('overlap');assert.ok(m.rows.some(r=>r.relation.includes('Overlap')));assert.ok(m.rows.some(r=>r.range.min!==r.range.max));});
+test('exact tie, incomplete coverage and missing source have explicit states',()=>{assert.ok(model('tie').rows.some(r=>r.relation.includes('Exact tie')));const p=model('partial');assert.equal(p.slot,'Absolute slot unavailable');assert.match(p.coverage,/3 \/ 4/);assert.equal(p.rows.at(-1).range,null);const s=model('missing-source');assert.equal(s.supported,false);assert.equal(s.slot,'Absolute slot unavailable');assert.ok(s.rows.every(r=>r.range===null));});
+test('in/out-window is never labeled immediate pit exit',()=>assert.match(model('window').type,/not immediate pit exit/));
+test('axis spans unwrapped lap-aware coordinates with negative progress',()=>{const r=syntheticPitWindow();r.comparisons[2].coordinate.coordinateSeconds={min:-180,max:-180};const m=pitWindowPresentation(r,identities);assert.ok(m.axis.min < -180);assert.equal(m.rows.at(-1).range.min,-180);});
+test('independent inputs and stable output; missing values never become zero',()=>{const r=syntheticPitWindow('partial'),before=structuredClone(r),a=pitWindowPresentation(r,identities);assert.deepEqual(a,pitWindowPresentation(r,identities));a.rows[0].range.min=0;assert.deepEqual(r,before);const m=pitWindowPresentation(null);assert.equal(m.axis,null);assert.equal(m.supported,false);assert.match(m.coverage,/unavailable/);});
