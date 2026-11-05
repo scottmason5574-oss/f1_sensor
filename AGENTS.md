@@ -77,7 +77,7 @@ and real race-feed evidence separately. Missing required runtime evidence
 blocks merge.
 
 One-time owner exception approved November 5, 2026: the isolated Circle of Doom
-Phase 3 foundation in PRs #11�16 at heads 737472ed, 38ced917, 844c5a65,
+Phase 3 foundation in PRs #11-16 at heads 737472ed, 38ced917, 844c5a65,
 a0d9039a, 1732bb3c and 897c84e5 may merge without new HA runtime evidence.
 This covers only the reviewed pure helpers and unused synthetic preview, with
 an empty pit-loss fallback catalog and no production consumers. It does not
