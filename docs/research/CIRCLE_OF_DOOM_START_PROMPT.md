@@ -6,7 +6,7 @@ description: Circle of Doom Phase 1 start prompt for F1 Sensor.
 
 # Circle of Doom Phase 1 start prompt
 
-Use this prompt once Phase 1 has been approved.
+This prompt records the original Phase 1 scope. For current status and Phase 3 preparation, use the [milestone handoff](./CIRCLE_OF_DOOM_NEXT_STEPS.md).
 
 > Work in scottmason5574-oss/f1_sensor on a feature branch. Use the fork as the sole writable remote and review upstream read-only. Read the repository instructions and the Circle of Doom source of truth, audit, readiness matrix and plan. Confirm the working revision and scope.
 >
