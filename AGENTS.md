@@ -76,6 +76,16 @@ reset, source-generation isolation and runtime logs. Record synthetic coverage
 and real race-feed evidence separately. Missing required runtime evidence
 blocks merge.
 
+One-time owner exception approved November 5, 2026: the isolated Circle of Doom
+Phase 3 foundation in PRs #11�16 at heads 737472ed, 38ced917, 844c5a65,
+a0d9039a, 1732bb3c and 897c84e5 may merge without new HA runtime evidence.
+This covers only the reviewed pure helpers and unused synthetic preview, with
+an empty pit-loss fallback catalog and no production consumers. It does not
+claim runtime tests passed, waive CI/security/package gates, authorize deployment,
+or extend to future adapters, live/replay integration or prediction enablement.
+Changed scope requires renewed review. See
+`docs/research/CIRCLE_OF_DOOM_NEXT_STEPS.md` for evidence limits and approval.
+
 # Release notes and commit policy
 
 F1 Sensor uses Conventional Commits and semantic-release. Preserve individual
