@@ -360,7 +360,11 @@ export class F1SensorCard extends LitElement {
       module.type === 'map' && module.options.circular_positioning === 'estimated')) && data.spoilerState(this.sourceHass, entry, this.config.context.spoilers) === 'clear' ? entry.entry_id : '';
     if (analysisKey !== this.analysisKey) {
       this.stopAnalysis?.(); this.stopAnalysis = null; this.analysisKey = analysisKey; this.analysisState = { data: null, status: 'loading' };
-      if (analysisKey) this.stopAnalysis = watchAnalysis(this.sourceHass, analysisKey, state => { this.analysisState = state; this.revision++; });
+      if (analysisKey) this.stopAnalysis = watchAnalysis(this.sourceHass, analysisKey, state => {
+        if (state.data !== this.analysisState.data) this.analysisReceivedAt = performance.now();
+        this.analysisState = state;
+        this.revision++;
+      });
     }
     const minisectorContexts = new Map();
     if (entry && data.spoilerState(this.sourceHass, entry, this.config.context.spoilers) === 'clear') {
@@ -674,7 +678,8 @@ export class F1SensorCard extends LitElement {
           const available = !this.frozen && this.sourceHass.connection?.connected !== false && this.analysisKey === entry?.entry_id && this.analysisState.status === 'ready';
           const analysis = this.modelPreview?.analysis ?? (available ? this.analysisState.data : null);
           const snapshot = this.modelPreview?.map ?? this.mapState.data?.snapshot;
-          model.circle = estimatedCircle(analysis, snapshot, (this.modelPreview?.now ?? Date.now()) / 1000);
+          model.circle = estimatedCircle(analysis, snapshot, (this.modelPreview?.now ?? Date.now()) / 1000,
+            this.modelPreview ? undefined : this.analysisReceivedAt);
           if (!model.seeking && model.circle.reason !== 'context' && analysis?.status === 'ready') {
             const roster = new Map((model.roster ?? []).map(row => [row.id, row]));
             const driver = effective.driver || focus.driver, team = effective.team || focus.team;
@@ -686,7 +691,11 @@ export class F1SensorCard extends LitElement {
               if (effective.options.focus === 'filter' && (driver || team) && !selected) continue;
               roster.set(id, { id, name: item.name ?? item.tla ?? id, driver: item.tla ?? id, team: item.team, team_color: item.team_color, selected });
             }
-            model.roster = [...roster.values()].sort((a, b) => Number(a.id) - Number(b.id));
+            const positions = new Map((analysis.timing ?? [])
+              .filter(row => Number.isSafeInteger(row.position) && row.position > 0)
+              .map(row => [String(row.driver_number), row.position]));
+            model.roster = [...roster.values()].sort((a, b) =>
+              (positions.get(a.id) ?? Infinity) - (positions.get(b.id) ?? Infinity) || Number(a.id) - Number(b.id));
           }
         }
         const laps = data.source(viewHass, viewEntry, 'race_lap_count'), trackStatus = data.source(viewHass, viewEntry, 'track_status');

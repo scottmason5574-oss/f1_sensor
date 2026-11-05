@@ -1,5 +1,73 @@
 const { test, expect } = require('@playwright/test');
 
+test('replay circle follows the playback clock and expires unsupported positions', async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: 'no-preference' });
+  await page.clock.install();
+  await mount(page, { view_mode: 'circular', circular_positioning: 'estimated' });
+  await page.evaluate(() => {
+    const card = window.fixtureCard, demo = window.fixtureDemo;
+    const connection = Object.assign(new EventTarget(), {
+      connected: true,
+      subscribeEvents: async () => () => {},
+      subscribeMessage: async (callback, message) => {
+        if (message.type === 'f1_sensor/track_map/subscribe') {
+          callback({ protocol_version: 2, type: 'snapshot', entry_id: 'demo', sequence: 1, geometry_revision: 1,
+            snapshot: { ...demo.preview.map, session: { session_key: '41' }, source: 'replay' } });
+        }
+        if (message.type === 'f1_sensor/analysis/subscribe') {
+          window.emitReplayCircle = ({ state, anchor = 100, asOf = 110, playback = asOf, generation = 1, epoch = 1, gapEpoch = epoch }) => callback({
+            protocol_version: 1, status: 'ready', provider: 'replay', session_id: '41:Race',
+            replay: { state, clock_position_ms: playback * 1000, clock_rate: state === 'playing' ? 2 : 0, duration_ms: 300000 },
+            estimated_circle: { session_key: '41', generation, leader: 4, epoch, anchor, as_of: asOf, duration_seconds: 90 },
+            replay_race_gap: { clock: 'replay_relative_seconds', as_of: asOf, leader: 4, epoch: gapEpoch,
+              observations: [{ driver_number: 1, event_time: asOf - 14, gap: '+9' }] },
+            timing: [{ driver_number: 4, position: 1 }, { driver_number: 1, position: 2 }],
+          });
+        }
+        return () => {};
+      },
+    });
+    card.previewData = null;
+    card.hass = { ...demo.hass, connection, callWS: async () => demo.preview.entries };
+  });
+  await page.waitForFunction(() => window.emitReplayCircle);
+  const emit = sample => page.evaluate(sample => window.emitReplayCircle(sample), sample);
+  const view = page.locator('f1-track-map-view');
+  const leader = view.locator('.circle-marker[data-driver="4"]');
+  const follower = view.locator('.circle-marker[data-driver="1"]');
+  await emit({ state: 'playing' });
+  await expect(leader).toBeVisible();
+  await expect(follower).toBeVisible();
+  await expect(view.locator('.circle-roster button').first()).toContainText('4 ·');
+  const initial = await leader.getAttribute('transform');
+  await page.clock.runFor(200);
+  expect(await leader.getAttribute('transform')).not.toBe(initial);
+  await page.clock.runFor(400);
+  await expect(follower).toBeHidden();
+  await expect(leader).toBeVisible();
+
+  await emit({ state: 'paused', playback: 111.2 });
+  const paused = await leader.getAttribute('transform');
+  await page.clock.runFor(1000);
+  await expect(leader).toHaveAttribute('transform', paused);
+  await emit({ state: 'seeking' });
+  await expect(leader).toHaveCount(0);
+  await emit({ state: 'paused', anchor: 50, asOf: 50, generation: 2, epoch: 2 });
+  await expect(leader).toHaveAttribute('transform', 'translate(50 8)');
+  await emit({ state: 'playing', anchor: 50, asOf: 50, generation: 2, epoch: 2, gapEpoch: 1 });
+  await expect(leader).toHaveCount(0);
+
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await emit({ state: 'playing', anchor: 50, asOf: 50, generation: 2, epoch: 2 });
+  await expect(leader).toHaveAttribute('transform', 'translate(50 8)');
+  await page.clock.runFor(300);
+  await expect(leader).toHaveAttribute('transform', 'translate(50 8)');
+  await page.clock.runFor(2600);
+  await expect(leader).toHaveCount(0);
+  await view.getByRole('button', { name: 'Physical', exact: true }).click();
+  await expect(view.locator('path.track')).toBeVisible();
+});
+
 async function mount(page, options, missingMap = false) {
   await page.goto('/frontend-tests/modular.html');
   await page.waitForFunction(() => window.modularReady);

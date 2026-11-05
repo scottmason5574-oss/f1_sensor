@@ -105,9 +105,10 @@ class F1TrackMapView extends LitElement {
   circleRows(now = performance.now()) {
     const circle = this.model?.circle;
     if (!circle?.rows.length || this.viewMode !== 'circular') return [];
-    const age = this.circleModel === circle ? (now - this.circleStart) / 1000 : 0;
+    const start = circle.receivedAt ?? (this.circleModel === circle ? this.circleStart : now);
+    const age = Math.max(0, now - start) / 1000 * (circle.rate ?? 1);
     if (age >= circle.lifetime) return [];
-    const advance = Number.isFinite(circle.lifetime) && !this.reducedMotion() ? age : 0;
+    const advance = this.reducedMotion() ? 0 : age;
     const positions = new Map(circle.rows.filter(row => age < row.expires).map(row => [row.id, row.gap]));
     return (this.model.roster ?? []).filter(row => positions.has(row.id)).map(row => ({
       ...row, point: circlePoint(circle.elapsed + advance, positions.get(row.id), circle.lap),
@@ -121,13 +122,14 @@ class F1TrackMapView extends LitElement {
       this.circleStart = performance.now();
     }
     if (this.viewMode !== 'circular' || !circle?.rows.length || !Number.isFinite(circle.lifetime)) return;
-    const age = (performance.now() - this.circleStart) / 1000;
+    const rate = circle.rate ?? 1;
+    const age = Math.max(0, performance.now() - (circle.receivedAt ?? this.circleStart)) / 1000 * rate;
     const nextExpiry = Math.min(circle.lifetime, ...circle.rows.map(row => row.expires).filter(expiry => expiry > age));
     if (nextExpiry <= age) return;
     this.circleExpiry = setTimeout(() => {
       this.requestUpdate();
       this.syncCircleMotion();
-    }, (nextExpiry - age) * 1000 + 1);
+    }, (nextExpiry - age) * 1000 / rate + 1);
     if (this.reducedMotion()) return;
     const animate = now => {
       const points = new Map(this.circleRows(now).map(row => [row.id, row.point]));

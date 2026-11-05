@@ -294,7 +294,7 @@ async def test_existing_websocket_receives_replay_control_without_timing_frames(
         )
         acknowledgment = await client.receive_json()
         assert acknowledgment["id"] == 3 and acknowledgment["success"]
-        await hass.async_block_till_done()
+        # A paused replay remains active until the entry is unloaded below.
         assert len(controller.session_manager._listeners) == listener_count
     finally:
         await client.close()

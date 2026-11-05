@@ -59,8 +59,34 @@ test('replay pauses on the delivered frame and rejects seeking, restart and futu
   const result = estimatedCircle(replay, replayMap, 9e8);
   assert.equal(result.elapsed, 10);
   assert.deepEqual(result.rows.map(row => row.id), ['4', '1']);
-  assert.deepEqual(estimatedCircle({ ...replay, replay: { state: 'playing', position_ms: 111000, speed: 4 } }, replayMap, 0), result);
+  const legacy = estimatedCircle({ ...replay, replay: { state: 'playing', position_ms: 111000 } }, replayMap, 0);
+  assert.equal(legacy.elapsed, 11);
+  assert.equal(legacy.rate, 0);
   for (const [state, position_ms] of [['seeking', 110000], ['playing', 109999], ['idle', 0], ['playing', 118000]]) {
     assert.equal(estimatedCircle({ ...replay, replay: { state, position_ms } }, replayMap, 0).reason, 'context');
   }
+});
+
+test('replay samples use playback time for phase, gap expiry and projection limits', () => {
+  const replay = {
+    ...frame, provider: 'replay',
+    replay: { state: 'playing', position_ms: 110000, clock_position_ms: 111000, clock_rate: 2, duration_ms: 114000 },
+    replay_race_gap: { clock: 'replay_relative_seconds', as_of: 110, leader: 4, epoch: 3, observations: [
+      { driver_number: 1, event_time: 97, gap: '+9.0' },
+      { driver_number: 2, event_time: 96, gap: '+1.0' },
+      { driver_number: 3, event_time: 110.5, gap: '+2.0' },
+    ] },
+  };
+  const replayMap = { ...map, source: 'replay' };
+  const moving = estimatedCircle(replay, replayMap, 0, 1234);
+  assert.equal(moving.elapsed, 11);
+  assert.equal(moving.rate, 2);
+  assert.equal(moving.receivedAt, 1234);
+  assert.equal(moving.lifetime, 3);
+  assert.deepEqual(moving.rows, [{ id: '4', gap: 0, expires: Infinity }, { id: '1', gap: 9, expires: 1 }]);
+  const paused = estimatedCircle({ ...replay, replay: { ...replay.replay, state: 'paused' } }, replayMap, 0, 1234);
+  assert.equal(paused.rate, 0);
+  assert.equal(paused.elapsed, moving.elapsed);
+  assert.equal(paused.lifetime, Infinity);
+  assert.equal(estimatedCircle({ ...replay, replay_race_gap: { ...replay.replay_race_gap, epoch: 2 } }, replayMap, 0, 1234).reason, 'context');
 });

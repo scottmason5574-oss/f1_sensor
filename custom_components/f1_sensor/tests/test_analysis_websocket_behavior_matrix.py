@@ -178,6 +178,35 @@ def test_subscription_coalesces_sends_and_cancels_pending(hass) -> None:
     hub.add.return_value.assert_called_once()
 
 
+def test_replay_subscription_samples_at_send_and_delivers_state_changes(hass) -> None:
+    def replay(state, position):
+        return {
+            "provider": "replay",
+            "replay": {"state": state, "clock_position_ms": position},
+        }
+
+    connection = _Connection()
+    hub = SimpleNamespace(
+        add=Mock(return_value=Mock()), payload=Mock(return_value=replay("playing", 100))
+    )
+    subscription = ws._AnalysisSubscription(hass, connection, 5, hub, 1.0)
+    subscription.async_send_initial()
+    subscription.receive(replay("playing", 110))
+    subscription._pending_handle.cancel()
+    hub.payload.return_value = replay("playing", 120)
+    subscription._send_pending(True)
+    assert connection.events[-1] == (5, replay("playing", 120))
+
+    subscription.receive(replay("playing", 130))
+    queued = subscription._pending_handle
+    subscription.receive(replay("paused", 140))
+    assert queued.cancelled()
+    assert connection.events[-1] == (5, replay("paused", 140))
+    subscription.receive(replay("seeking", 140))
+    assert connection.events[-1] == (5, replay("seeking", 140))
+    subscription.unsubscribe()
+
+
 @pytest.mark.asyncio
 async def test_hub_demand_can_close_empty_bus_and_update_legacy_state(hass) -> None:
     bus = SimpleNamespace(
