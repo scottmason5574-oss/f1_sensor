@@ -57,3 +57,22 @@ test('CLI failures identify the operation without retaining raw subprocess data'
     return true;
   });
 });
+
+test('API failures retain only numeric HTTP status and a fixed sanitized classification', () => {
+  for (const [status, classification] of [[401, 'authentication'], [403, 'forbidden-or-rate-limited'],
+    [404, 'not-found'], [409, 'conflict-or-validation'], [422, 'conflict-or-validation'],
+    [429, 'rate-limited'], [503, 'server-error']]) {
+    assert.throws(() => githubApi(['api', '--method', 'DELETE', 'repos/owner/repo/releases/assets/123'], {
+      log: () => {}, execute: () => { throw Object.assign(new Error('secret-token'), {
+        stderr: `gh: secret-body (HTTP ${status})\nAuthorization: secret-token`, stdout: 'secret-body'
+      }); }
+    }), error => {
+      assert.equal(error.httpStatus, status);
+      assert.equal(error.classification, classification);
+      assert.match(error.message, new RegExp(`HTTP ${status}`));
+      assert.equal(error.cause, undefined);
+      assert.doesNotMatch(JSON.stringify(error) + error.message, /secret|Authorization/);
+      return true;
+    });
+  }
+});

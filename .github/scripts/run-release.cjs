@@ -5,6 +5,7 @@ const {execFileSync} = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const {createHash} = require('node:crypto');
 const { setReleaseContributors } = require('./release-contributors.cjs');
 const {
   compareReleaseTags, isBranchTag, mergedReleaseTags, parseReleaseTag,
@@ -16,7 +17,8 @@ const {
   isUntaggedRelease,
   replaceEditorial
 } = require('./release-editorial.cjs');
-const {githubApi} = require('./release-cli.cjs');
+const {githubApi, httpFailure} = require('./release-cli.cjs');
+const {recoverDraftAssets} = require('./draft-assets.cjs');
 const run = (command, args, options={}) => command === 'gh'
   ? githubApi(args)
   : execFileSync(command,args,{encoding:'utf8',...options});
@@ -233,7 +235,8 @@ async function uploadReleaseAsset({release, filename, request=globalThis.fetch})
     body:fs.readFileSync(path.resolve(filename))
   });
   if (!response.ok) {
-    throw new Error(`Could not upload ${filename} to draft release ${release.id}: ${response.status} ${await response.text()}`);
+    const details = httpFailure(response.status);
+    throw Object.assign(new Error(`Draft asset upload failed (HTTP ${details.httpStatus ?? 'unknown'}; ${details.classification}); response withheld`), details);
   }
 }
 
@@ -303,16 +306,16 @@ async function recoverDraft({branch, tag, releases=listReleases()}) {
     }
     if (!current?.draft) throw new Error('The release is no longer a draft; refusing to replace assets.');
     if (current.tag_name !== tag) throw new Error(`Draft release ${current.id} is not associated with ${tag}.`);
-    const assets = JSON.parse(run('gh',[
-      'api',`repos/${process.env.GITHUB_REPOSITORY}/releases/${current.id}/assets`
-    ]));
-    for (const filename of ['f1_sensor.zip','f1_sensor.zip.sha256','f1_sensor.zip.spdx.json']) {
-      for (const asset of assets.filter(candidate => candidate.name === filename)) {
-        run('gh',['api','--method','DELETE',
-          `repos/${process.env.GITHUB_REPOSITORY}/releases/assets/${asset.id}`]);
-      }
-      await uploadReleaseAsset({release:current,filename});
-    }
+    const expected = ['f1_sensor.zip','f1_sensor.zip.sha256','f1_sensor.zip.spdx.json'].map(name => {
+      const bytes = fs.readFileSync(path.resolve(name));
+      return {name, size: bytes.length, digest: `sha256:${createHash('sha256').update(bytes).digest('hex')}`};
+    });
+    await recoverDraftAssets({release: current, tag, expected,
+      readRelease: () => JSON.parse(run('gh', ['api',
+        `repos/${process.env.GITHUB_REPOSITORY}/releases/${current.id}`])),
+      listAssets: () => JSON.parse(run('gh', ['api',
+        `repos/${process.env.GITHUB_REPOSITORY}/releases/${current.id}/assets?per_page=100`, '--paginate', '--slurp'])).flat(),
+      upload: (release, filename) => uploadReleaseAsset({release, filename})});
     console.log(`Recovered draft ${tag}; publication remains manual.`);
   } finally {
     if (worktreeAdded) {
