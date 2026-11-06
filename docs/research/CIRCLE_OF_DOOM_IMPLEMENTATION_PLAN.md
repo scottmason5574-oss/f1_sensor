@@ -43,7 +43,7 @@ The earlier certification requirements apply to any future verified positioning 
 
 ## Phase 3 — Straight-line pit window
 
-**Synthetic foundation implemented; production integration pending.** PRs #12–16 implement Phase 3.1–3.4A contracts, pure mathematical helpers and an isolated preview. They remain unmerged and do not enable production predictions. See the [handoff](./CIRCLE_OF_DOOM_NEXT_STEPS.md) for the owner-approved one-time runtime exception and merge gates. Production integration will reuse Phase 2 driver selection and timing inputs only after separate review.
+**Synthetic foundation merged; production integration pending.** PRs #12–16 landed through main `efccd191bc0d4adbc8af5f4ca5d2c38c18c6ab35`. Phase 3.1–3.4A supplies contracts, pure mathematical helpers and an isolated preview; it enables no production predictions. The owner authorized Phase 3.4B Task 1 only: a pure [availability decision boundary](./CIRCLE_OF_DOOM_PHASE3_4B_AVAILABILITY.md) and milestone reconciliation. Tasks 2–5, including panel integration, timing adapters, calibration and prediction consumers, remain unauthorized. See the [handoff](./CIRCLE_OF_DOOM_NEXT_STEPS.md) for exact-source evidence and historical limitations. The foundation runtime exception does not extend to future integration.
 
 - Estimate pit-loss time and expose its provenance, including whether it comes from an approved circuit fallback. Show an unavailable state when suitable evidence is missing.
 - Show the selected driver and nearby traffic in a straight-line pit window. Predict a rejoin position and a potential rank range when the inputs support them.

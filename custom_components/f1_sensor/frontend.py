@@ -63,6 +63,7 @@ LIVE_DATA_CARD_ASSET_FILENAMES = (
     "modular/analysis-data.js",
     "modular/circle-data.js",
     "modular/pit-window.js",
+    "modular/pit-window-availability.js",
     "modular/pit-window-presentation.js",
     "modular/pit-window-view.js",
     "modular/race-gap.js",
