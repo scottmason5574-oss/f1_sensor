@@ -1,0 +1,10 @@
+<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Synthetic pit-window laboratory</title>
+<style>body{margin:0;background:#08121e;color:#e9edf3;font:16px system-ui,sans-serif}main{max-width:960px;margin:32px auto;padding:16px}label{display:block;margin:16px 0}select{min-height:44px;background:#16263a;color:inherit;padding:8px;border:1px solid #78899b;border-radius:6px;font:inherit;max-width:100%}select:focus-visible{outline:3px solid #78bfff;outline-offset:3px}h1{font-size:1.4rem}p{overflow-wrap:anywhere}footer{padding:20px 0;color:#b9c1ce}</style>
+<main><h1>Synthetic pit-window laboratory</h1><p>Fictitious drivers and loss values. No live or replay connection.</p><label>Demo scenario <select id="scenario"><option value="exact">Exact slot</option><option value="uncertain">Uncertain slot range</option><option value="overlap">Overlapping traffic</option><option value="tie">Exact tie</option><option value="partial">Incomplete grid</option><option value="missing-source">Unavailable loss source</option><option value="window">In/out-window horizon</option></select></label><f1-pit-window-view></f1-pit-window-view><footer>Standalone presentation review only. Nothing shown here is a real-circuit prediction.</footer></main>
+<script type="module">
+import '../custom_components/f1_sensor/www/f1-sensor-live-data-card/modular/pit-window-view.js';
+import {identities,syntheticPitWindow} from './fixtures/pit-window-demo.js';
+const view=document.querySelector('f1-pit-window-view'),scenario=document.querySelector('#scenario');let selected='1';
+function render(){view.identities=identities;view.selectedId=selected;view.result=syntheticPitWindow(scenario.value,selected);}
+scenario.addEventListener('change',render);view.addEventListener('pit-driver-select',e=>{selected=e.detail.driverId;render();});render();
+</script></html>
