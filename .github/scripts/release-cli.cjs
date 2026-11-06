@@ -2,6 +2,17 @@
 
 const child = require('node:child_process');
 
+function httpFailure(status) {
+  const httpStatus = Number.isInteger(status) && status >= 100 && status <= 599 ? status : null;
+  const classification = httpStatus === 401 ? 'authentication'
+    : httpStatus === 403 ? 'forbidden-or-rate-limited'
+      : httpStatus === 404 ? 'not-found'
+        : httpStatus === 429 ? 'rate-limited'
+          : [409, 422].includes(httpStatus) ? 'conflict-or-validation'
+            : httpStatus >= 500 ? 'server-error' : httpStatus ? 'http-error' : 'transport-or-cli';
+  return {httpStatus, classification};
+}
+
 // gh is invoked directly (no shell or extensions). SIGKILL also bounds a CLI
 // which ignores SIGTERM; stdin is closed so it cannot wait for a prompt.
 function githubApi(args, {timeout = 30000, execute = child.execFileSync, log = console.info} = {}) {
@@ -23,10 +34,16 @@ function githubApi(args, {timeout = 30000, execute = child.execFileSync, log = c
   } catch (cause) {
     // Do not retain the subprocess error: it contains argv, stdout and stderr.
     const timedOut = cause.code === 'ETIMEDOUT';
-    const error = new Error(`${label}: ${timedOut ? `timed out after ${timeout}ms` : 'failed'}; response and command arguments withheld`);
+    // Extract only gh's numeric status suffix, never its message or body.
+    const status = /^gh: [^\r\n]* \(HTTP ([1-5]\d{2})\)\r?$/m.exec(String(cause.stderr || ''));
+    const details = httpFailure(status ? Number(status[1]) : null);
+    const diagnosis = timedOut ? `timed out after ${timeout}ms`
+      : `failed (HTTP ${details.httpStatus ?? 'unknown'}; ${details.classification})`;
+    const error = new Error(`${label}: ${diagnosis}; response and command arguments withheld`);
     error.code = timedOut ? 'RELEASE_CLI_TIMEOUT' : 'RELEASE_CLI_FAILED';
+    Object.assign(error, details);
     throw error;
   }
 }
 
-module.exports = {githubApi};
+module.exports = {githubApi, httpFailure};

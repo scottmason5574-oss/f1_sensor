@@ -2,9 +2,16 @@ const {test, mock} = require('node:test');
 const assert = require('node:assert/strict');
 const child = require('node:child_process');
 const fs = require('node:fs');
+const {createHash} = require('node:crypto');
 
-async function runCase({tag='',published=false,changesDuringBuild=false,mismatched=false,branch='beta',createRc=false}={}) {
-  const calls=[]; const fetchCalls=[];
+async function runCase({tag='',published=false,changesDuringBuild=false,mismatched=false,branch='beta',createRc=false,completeAssets=false}={}) {
+  const calls=[]; const fetchCalls=[]; const uploaded=[];
+  if (completeAssets) {
+    for (const name of ['f1_sensor.zip', 'f1_sensor.zip.sha256', 'f1_sensor.zip.spdx.json']) {
+      uploaded.push({id: uploaded.length + 1, name, state: 'uploaded', size: 5,
+        digest: `sha256:${createHash('sha256').update('asset').digest('hex')}`});
+    }
+  }
   let currentTag=mismatched ? 'untagged-abc123' : tag.trim().split('\n').at(-1);
   const old={branch:process.env.GITHUB_REF_NAME,repo:process.env.GITHUB_REPOSITORY,
     createRc:process.env.CREATE_RC,stage:process.env.RELEASE_STAGE};
@@ -20,6 +27,7 @@ async function runCase({tag='',published=false,changesDuringBuild=false,mismatch
         currentTag=args.find(arg=>String(arg).startsWith('tag_name=')).slice('tag_name='.length);
       }
       if (args.some(arg=>String(arg).endsWith('/assets'))) return '[]';
+      if (args.some(arg=>String(arg).includes('/assets?'))) return JSON.stringify([uploaded]);
       if (args.includes('--method') && args.includes('POST')) return '{}';
       const release={id:42,tag_name:currentTag,name:tag.trim(),target_commitish:branch,
         upload_url:'https://uploads.github.com/repos/Nicxe/f1_sensor/releases/42/assets{?name,label}',
@@ -33,7 +41,11 @@ async function runCase({tag='',published=false,changesDuringBuild=false,mismatch
     return '';
   });
   const mockedFetch=mock.method(globalThis,'fetch',async(...args)=>{
-    fetchCalls.push(args);return {ok:true,status:201,text:async()=>''};
+    fetchCalls.push(args);
+    uploaded.push({id: uploaded.length + 1, name: new URL(args[0]).searchParams.get('name'),
+      size: args[1].body.length, state: 'uploaded',
+      digest: `sha256:${createHash('sha256').update(args[1].body).digest('hex')}`});
+    return {ok:true,status:201,text:async()=>''};
   });
   const originalReadFile=fs.readFileSync;
   const mockedRead=mock.method(fs,'readFileSync',(file,...args)=>
@@ -55,6 +67,13 @@ test('an existing draft is rebuilt at its original version and verified before u
   assert.equal(calls.fetchCalls.length,3);
   assert.ok(calls.fetchCalls.every(([url])=>String(url).startsWith('https://uploads.github.com/')));
   assert.ok(!calls.some(([,a])=>a.includes('release') && a.includes('create')));
+});
+
+test('complete draft recovery verifies tagged bytes without deleting or uploading existing assets', async () => {
+  const calls = await runCase({tag: 'v1.3.0\n', branch: 'main', completeAssets: true});
+  assert.ok(calls.some(([command, args]) => command === 'python3' && args.includes('scripts/verify_release.py')));
+  assert.equal(calls.fetchCalls.length, 0);
+  assert.ok(!calls.some(([command, args]) => command === 'gh' && args.includes('DELETE')));
 });
 test('publication during recovery prevents asset replacement',async()=>{
   await assert.rejects(runCase({tag:'v5.5.0-beta.2\n',changesDuringBuild:true}),/no longer a draft/);
