@@ -237,3 +237,86 @@ export function compareRaceTime(frame, options = {}, reference, leftId, rightId)
     differenceSeconds: difference,
     relation: tie ? 'tie' : difference.min > 0 ? 'ahead' : difference.max < 0 ? 'behind' : 'overlap' };
 }
+
+/** Hypothetical ordinal-slot bounds for one declared independent interval box. */
+export function rankHypotheticalRejoin(frame, options = {}, reference, selectedDriver) {
+  const empty = reason => ({ hypothetical: true, status: 'unavailable', reason,
+    rankingAvailable: false, position: null, positionRange: null, coverage: null, comparisons: [], nearest: null });
+  if (options?.uncertaintyModel !== 'independent_intervals' || options.jointConstraints !== undefined) return empty('unsupported_joint_model');
+  const roster = options.gridDriverIds;
+  if (!Array.isArray(roster) || !roster.length || roster.some(id => !text(id)) ||
+      new Set(roster).size !== roster.length || !roster.includes(selectedDriver) ||
+      !Array.isArray(frame?.drivers) || frame.drivers.some(row => !roster.includes(row?.driverId))) {
+    return empty('invalid_grid_roster');
+  }
+  const selected = compareRaceTime(frame, options, reference, selectedDriver, selectedDriver);
+  if (selected.status === 'unavailable') return empty(selected.reason);
+  const rosterReason = observationReason(options.gridObservation, frame, options.maxAge);
+  if (rosterReason) return empty(rosterReason);
+  if (options.gridObservation.complete !== true || options.gridObservation.eventTime !== frame.asOf) return empty('unverified_grid_roster');
+  const comparisons = [], eligible = [selected.left];
+  const sortedRoster = [...roster].sort(); // Identity order only, never a racing tie breaker.
+  for (const id of sortedRoster.filter(id => id !== selectedDriver)) {
+    const pair = compareRaceTime(frame, options, reference, selectedDriver, id);
+    if (pair.status !== 'unavailable') eligible.push(pair.right);
+    comparisons.push({ driverId: id, status: pair.status, reason: pair.reason,
+      driverReason: pair.right?.reason ?? null,
+      relation: pair.relation === 'ahead' ? 'definitely_behind' : pair.relation === 'behind'
+        ? 'definitely_ahead' : pair.relation === 'tie' ? 'tie' : pair.relation === 'overlap' ? 'uncertain' : null,
+      differenceFromSelectedSeconds: pair.differenceSeconds
+        ? { min: -pair.differenceSeconds.max, max: -pair.differenceSeconds.min } : null,
+      coordinate: pair.status === 'unavailable' ? null : pair.right });
+  }
+  const complete = eligible.length === roster.length;
+  const result = { hypothetical: true,
+    status: eligible.some(row => row.status === 'provisional') || selected.status === 'provisional' ? 'provisional' : 'known',
+    reason: complete ? null : 'incomplete_traffic',
+    context: copyContext(selected.context), asOf: selected.asOf, comparisonTime: selected.comparisonTime,
+    horizon: structuredClone(selected.horizon), reference: structuredClone(reference),
+    selected: selected.left, evidence: { ...structuredClone(frame),
+      drivers: frame.drivers.filter(row => eligible.some(item => item.driverId === row.driverId)).map(row => structuredClone(row)) },
+    uncertaintyModel: options.uncertaintyModel,
+    coverage: { expected: roster.length, eligible: eligible.length, complete,
+      missingOrIneligible: comparisons.filter(row => row.status === 'unavailable').map(row => row.driverId) },
+    comparisons, rankingAvailable: false, position: null, positionRange: null, nearest: null, witnesses: null };
+  // Check the entire eligible baseline, not only pairs involving the selection.
+  const classification = [...eligible].sort((a, b) => a.position - b.position);
+  if (classification.some((row, index) => index > 0 &&
+      (row.position === classification[index - 1].position || row.baseSeconds > classification[index - 1].baseSeconds)) ||
+      (complete && classification.some((row, index) => row.position !== index + 1))) {
+    return { ...result, status: 'unavailable', reason: 'incompatible_grid_classification' };
+  }
+  const traffic = eligible.filter(row => row.driverId !== selectedDriver);
+  const s = selected.left.coordinateSeconds;
+  const witness = (selectedValue, bound) => {
+    const values = traffic.map(row => ({ driverId: row.driverId, value: row.coordinateSeconds[bound] }));
+    return { selectedValue, traffic: values, strictlyAhead: values.filter(row => row.value > selectedValue).length,
+      tied: values.filter(row => row.value === selectedValue).length };
+  };
+  // Both bounds have a single simultaneous witness, not separate incompatible
+  // choices of the selected driver's coordinate for each pairwise comparison.
+  const best = witness(s.max, 'min'), worst = witness(s.min, 'max');
+  if (complete) {
+    result.rankingAvailable = true;
+    result.positionRange = { best: 1 + best.strictlyAhead, worst: 1 + worst.strictlyAhead + worst.tied };
+    result.position = result.positionRange.best === result.positionRange.worst ? result.positionRange.best : null;
+    result.witnesses = { best, worst };
+  }
+  const nearest = direction => {
+    const candidates = traffic.filter(row => direction === 'ahead'
+      ? row.coordinateSeconds.min > s.max : row.coordinateSeconds.max < s.min);
+    for (const candidate of candidates) {
+      const c = candidate.coordinateSeconds;
+      const group = candidates.filter(row => row.driverId === candidate.driverId ||
+        (c.min === c.max && row.coordinateSeconds.min === c.min && row.coordinateSeconds.max === c.max));
+      if (traffic.every(row => group.includes(row) || (direction === 'ahead'
+        ? row.coordinateSeconds.max <= s.min || row.coordinateSeconds.min > c.max
+        : row.coordinateSeconds.min >= s.max || row.coordinateSeconds.max < c.min))) {
+        return { driverIds: group.map(row => row.driverId).sort(), conditionalOnCoverage: !complete };
+      }
+    }
+    return null;
+  };
+  result.nearest = { ahead: nearest('ahead'), behind: nearest('behind'), conditionalOnCoverage: !complete };
+  return result;
+}
